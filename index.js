@@ -1,321 +1,242 @@
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
-const Anthropic   = require("@anthropic-ai/sdk");
-const ExcelJS     = require("exceljs");
 const axios       = require("axios");
 const fs          = require("fs");
-const path        = require("path");
+const { guardarGasto, siguienteCorr, avanzarCorr, EXCEL } = require("./excel");
+const { subirFoto } = require("./drive");
 
-// ── Configuración ────────────────────────────────────────
-const bot    = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
-const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
-const DATOS_DIR    = path.resolve("./datos");
-const EXCEL_PATH   = path.join(DATOS_DIR, "Registro_Gastos.xlsx");
-const COUNTER_PATH = path.join(DATOS_DIR, "correlativo.json");
+// ── Sesiones ─────────────────────────────────────────────
+const S = {};
+function ses(id) { if (!S[id]) S[id] = { paso: "inicio", d: {} }; return S[id]; }
+function set(id, paso, d) { S[id] = { paso, d: d !== undefined ? d : (S[id]?.d || {}) }; }
+function reset(id) { S[id] = { paso: "inicio", d: {} }; }
 
-fs.mkdirSync(DATOS_DIR, { recursive: true });
+// ── Analizar imagen con Claude ────────────────────────────
+async function analizarImagen(fileId) {
+  const fileInfo = await bot.getFile(fileId);
+  const fileUrl  = `https://api.telegram.org/file/bot${process.env.TELEGRAM_TOKEN}/${fileInfo.file_path}`;
+  const imgRes   = await axios.get(fileUrl, { responseType: "arraybuffer", timeout: 20000 });
+  const buffer   = Buffer.from(imgRes.data);
+  const b64      = buffer.toString("base64");
+  const ext      = fileInfo.file_path.split(".").pop().toLowerCase();
+  const mime     = { jpg:"image/jpeg", jpeg:"image/jpeg", png:"image/png", webp:"image/webp" }[ext] || "image/jpeg";
 
-// ── Estado de conversación por usuario ──────────────────
-const sesiones = {};
+  const resp = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 300,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mime, data: b64 } },
+          { type: "text", text: `Analiza esta boleta o recibo. Responde SOLO con JSON sin markdown:
+{"fecha":"DD/MM/YYYY","monto":numero,"moneda":"CLP","comercio":"nombre"}
+Usa null si no ves el dato. Si no es boleta: {"error":"no es boleta"}` }
+        ]
+      }]
+    },
+    {
+      headers: {
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      timeout: 30000
+    }
+  );
 
-function sesion(chatId) {
-  if (!sesiones[chatId]) sesiones[chatId] = { paso: "inicio", draft: {} };
-  return sesiones[chatId];
-}
-function setPaso(chatId, paso, draft = null) {
-  sesiones[chatId] = { paso, draft: draft ?? sesiones[chatId]?.draft ?? {} };
-}
-function resetear(chatId) {
-  sesiones[chatId] = { paso: "inicio", draft: {} };
-}
-
-// ── Correlativo persistente ──────────────────────────────
-function siguienteCorr() {
-  try { return JSON.parse(fs.readFileSync(COUNTER_PATH)).next || 1; } catch { return 1; }
-}
-function avanzarCorr(n) {
-  fs.writeFileSync(COUNTER_PATH, JSON.stringify({ next: n + 1 }));
-}
-
-// ── Excel acumulativo ────────────────────────────────────
-async function agregarGasto(gasto) {
-  const wb = new ExcelJS.Workbook();
-  const HEADER = "FF128C7E";
-
-  if (fs.existsSync(EXCEL_PATH)) {
-    await wb.xlsx.readFile(EXCEL_PATH);
-  } else {
-    // Crear libro nuevo con estructura
-    const ws = wb.addWorksheet("Gastos");
-    ws.columns = [
-      { header: "Correlativo", key: "correlativo", width: 13 },
-      { header: "Fecha",       key: "fecha",        width: 12 },
-      { header: "Monto",       key: "monto",        width: 14 },
-      { header: "Moneda",      key: "moneda",        width: 8  },
-      { header: "Comercio",    key: "comercio",      width: 22 },
-      { header: "Descripción", key: "descripcion",   width: 32 },
-      { header: "Motivo",      key: "motivo",        width: 20 },
-      { header: "Destino",     key: "destino",       width: 20 },
-      { header: "Detalle",     key: "detalle",       width: 32 },
-    ];
-    ws.getRow(1).eachCell(cell => {
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER } };
-      cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
-      cell.alignment = { horizontal: "center", vertical: "middle" };
-    });
-    ws.getRow(1).height = 22;
-    wb.addWorksheet("Por Motivo");
-    wb.addWorksheet("Por Destino");
-    await wb.xlsx.writeFile(EXCEL_PATH);
-    await wb.xlsx.readFile(EXCEL_PATH);
-  }
-
-  const ws  = wb.getWorksheet("Gastos");
-  const num = ws.lastRow ? ws.lastRow.number : 1;
-
-  const fila = ws.addRow({
-    correlativo: `GASTO_${String(gasto.correlativo).padStart(4, "0")}`,
-    fecha:       gasto.fecha,
-    monto:       gasto.monto,
-    moneda:      gasto.moneda || "CLP",
-    comercio:    gasto.comercio || "",
-    descripcion: gasto.descripcion || "",
-    motivo:      gasto.motivo || "",
-    destino:     gasto.destino || "",
-    detalle:     gasto.detalle || "",
-  });
-  fila.getCell("monto").numFmt = "#,##0";
-  if (fila.number % 2 === 0) {
-    fila.eachCell({ includeEmpty: true }, cell => {
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F8F6" } };
-    });
-  }
-
-  // Resúmenes
-  for (const [hoja, campo] of [["Por Motivo","motivo"],["Por Destino","destino"]]) {
-    let wsr = wb.getWorksheet(hoja);
-    if (!wsr) wsr = wb.addWorksheet(hoja);
-    wsr.spliceRows(1, wsr.lastRow?.number || 0);
-    wsr.columns = [{ header: campo === "motivo" ? "Motivo" : "Destino", key: "cat", width: 26 }, { header: "Total", key: "total", width: 16 }];
-    wsr.getRow(1).eachCell(cell => {
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER } };
-      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
-    });
-    const mapa = {};
-    ws.eachRow((r, i) => {
-      if (i === 1) return;
-      const k = r.getCell(campo).value || "Sin clasificar";
-      mapa[k] = (mapa[k] || 0) + (Number(r.getCell("monto").value) || 0);
-    });
-    Object.entries(mapa).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => {
-      const r = wsr.addRow({ cat: k, total: v });
-      r.getCell("total").numFmt = "#,##0";
-    });
-  }
-
-  await wb.xlsx.writeFile(EXCEL_PATH);
-  return num; // total registros
+  const texto = resp.data?.content?.[0]?.text || "";
+  const clean = texto.replace(/```json|```/g, "").trim();
+  try { return { datos: JSON.parse(clean), buffer }; }
+  catch { return { datos: { error: "parse" }, buffer }; }
 }
 
-// ── Analizar imagen con Claude ───────────────────────────
-async function analizarBoleta(fileUrl) {
-  const res  = await axios.get(fileUrl, { responseType: "arraybuffer" });
-  const b64  = Buffer.from(res.data).toString("base64");
-  const mime = "image/jpeg";
-
-  const result = await claude.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 800,
-    messages: [{
-      role: "user",
-      content: [
-        { type: "image", source: { type: "base64", media_type: mime, data: b64 } },
-        { type: "text", text: `Analiza esta imagen. Si es una boleta, recibo o comprobante de pago responde SOLO con JSON sin markdown:
-{"fecha":"DD/MM/YYYY","monto":número,"moneda":"CLP","comercio":"nombre","descripcion":"qué se compró en máx 15 palabras"}
-Usa null si no ves el dato. Si NO es un comprobante responde: {"error":"no es boleta"}` }
-      ]
-    }]
-  });
-
-  const raw = result.content.map(c => c.text||"").join("").replace(/```json|```/g,"").trim();
-  try { return JSON.parse(raw); } catch { return { error: "parse" }; }
-}
-
-// ── Teclado de opciones ──────────────────────────────────
-const btnCancelar = { reply_markup: { keyboard: [["❌ Cancelar"]], resize_keyboard: true } };
-const btnConfirmar = {
-  reply_markup: {
-    keyboard: [["✅ Confirmar"], ["❌ Cancelar"]],
-    resize_keyboard: true,
-    one_time_keyboard: true
-  }
+// ── Teclados ─────────────────────────────────────────────
+const KB = {
+  cancelar:  { reply_markup: { keyboard: [["Cancelar"]], resize_keyboard: true } },
+  confirmar: { reply_markup: { keyboard: [["Confirmar", "Cancelar"]], resize_keyboard: true, one_time_keyboard: true } },
+  omitir:    { reply_markup: { keyboard: [["Omitir", "Cancelar"]], resize_keyboard: true, one_time_keyboard: true } },
+  inicio:    { reply_markup: { keyboard: [["Ver planilla"]], resize_keyboard: true } },
 };
-const btnInicio = { reply_markup: { keyboard: [["📊 Ver planilla"]], resize_keyboard: true } };
 
-// ── Manejador principal ──────────────────────────────────
+async function pedirMotivo(id, draft) {
+  const mFmt = draft.monto != null
+    ? `${draft.moneda || "CLP"} $${Number(draft.monto).toLocaleString("es-CL")}`
+    : "no detectado";
+  set(id, "motivo", draft);
+  await bot.sendMessage(id,
+    `Datos detectados:\n\nFecha: ${draft.fecha || "no detectada"}\nMonto: ${mFmt}${draft.comercio ? `\nComercio: ${draft.comercio}` : ""}\n\nCual es el MOTIVO del gasto?\n(ej: Alimentacion, Transporte, Utiles...)`,
+    KB.cancelar
+  );
+}
+
+// ── Manejador ─────────────────────────────────────────────
 bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const texto  = msg.text?.trim() || "";
-  const s      = sesion(chatId);
+  const id  = msg.chat.id;
+  const txt = (msg.text || "").trim();
+  const cur = ses(id);
 
-  // Cancelar en cualquier momento
-  if (texto === "❌ Cancelar" || texto.toLowerCase() === "/cancelar") {
-    resetear(chatId);
-    return bot.sendMessage(chatId, "❌ Operación cancelada.\n\nEnvíame una foto de boleta para empezar.", btnInicio);
+  if (txt === "Cancelar" || txt === "/cancelar") {
+    reset(id);
+    return bot.sendMessage(id, "Cancelado. Envia una foto de boleta para empezar.", KB.inicio);
   }
 
-  // Comando /start
-  if (texto === "/start") {
-    resetear(chatId);
-    return bot.sendMessage(chatId,
-      "👋 ¡Hola! Soy tu *bot de gastos*.\n\n" +
-      "📷 Envíame una foto de tu boleta o recibo y lo registraré automáticamente.\n\n" +
-      "Comandos:\n• /planilla — recibir el Excel actualizado\n• /cancelar — cancelar operación",
-      { parse_mode: "Markdown", ...btnInicio }
+  if (txt === "/planilla" || txt === "Ver planilla") {
+    if (!fs.existsSync(EXCEL))
+      return bot.sendMessage(id, "Aun no tienes gastos registrados.\nEnvia una foto de boleta para empezar.");
+    await bot.sendMessage(id, "Enviando tu planilla Excel...");
+    return bot.sendDocument(id, EXCEL, { caption: "Tu planilla de gastos actualizada" });
+  }
+
+  if (txt === "/start") {
+    reset(id);
+    return bot.sendMessage(id,
+      "Hola! Soy tu bot de gastos.\n\n" +
+      "Envia una FOTO de boleta o recibo y registrare el gasto automaticamente.\n\n" +
+      "Comandos:\n/planilla - recibir el Excel\n/cancelar - cancelar",
+      KB.inicio
     );
   }
 
-  // Pedir planilla
-  if (texto === "/planilla" || texto === "📊 Ver planilla") {
-    if (!fs.existsSync(EXCEL_PATH)) {
-      return bot.sendMessage(chatId, "📭 Aún no tienes gastos registrados.\n\nEnvíame una foto de boleta para empezar.");
-    }
-    await bot.sendMessage(chatId, "📤 Enviando tu planilla...");
-    return bot.sendDocument(chatId, EXCEL_PATH, { caption: "📊 Tu planilla de gastos actualizada" });
-  }
-
-  // ── Recibir foto ──
+  // ── Foto recibida ─────────────────────────────────────
   if (msg.photo || msg.document?.mime_type?.startsWith("image/")) {
-    if (s.paso !== "inicio" && s.paso !== "esperando_foto") {
-      return bot.sendMessage(chatId, "⚠️ Estoy esperando tu respuesta. Escribe *❌ Cancelar* si quieres empezar de nuevo.", { parse_mode: "Markdown" });
-    }
+    if (cur.paso !== "inicio")
+      return bot.sendMessage(id, "Escribe Cancelar primero.", KB.cancelar);
 
-    setPaso(chatId, "procesando");
-    const procesando = await bot.sendMessage(chatId, "🔍 Analizando tu boleta con IA...");
+    const msj = await bot.sendMessage(id, "Leyendo boleta con IA...");
 
     try {
-      // Obtener URL de la foto (mayor resolución)
-      const fileId  = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
-      const file    = await bot.getFile(fileId);
-      const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_TOKEN}/${file.file_path}`;
+      const fileId = msg.photo
+        ? msg.photo[msg.photo.length - 1].file_id
+        : msg.document.file_id;
 
-      const datos = await analizarBoleta(fileUrl);
-      await bot.deleteMessage(chatId, procesando.message_id).catch(() => {});
+      const { datos, buffer } = await analizarImagen(fileId);
+      await bot.deleteMessage(id, msj.message_id).catch(() => {});
+
+      const corr       = siguienteCorr();
+      const fotoNombre = `GASTO_${String(corr).padStart(4, "0")}.jpg`;
+
+      // Subir foto a Google Drive
+      let fotoUrl = "";
+      try {
+        const foto = await subirFoto(buffer, fotoNombre);
+        fotoUrl = foto.url;
+        console.log("Foto subida a Drive:", fotoNombre);
+      } catch (e) {
+        console.error("Error subiendo foto:", e.message);
+      }
 
       if (datos.error) {
-        setPaso(chatId, "inicio");
-        return bot.sendMessage(chatId, "⚠️ No pude detectar una boleta en esa imagen.\nEnvía una foto más clara del comprobante.", btnInicio);
+        // No es boleta — pedir datos manualmente
+        set(id, "fecha", { corr, fotoNombre, fotoUrl });
+        return bot.sendMessage(id,
+          "No pude leer los datos automaticamente.\n\nIngresemos manualmente.\n\nCual es la FECHA?\n(ej: 13/06/2026 o escribe 'hoy')",
+          KB.cancelar
+        );
       }
 
-      const corr     = siguienteCorr();
-      const fecha    = datos.fecha || new Date().toLocaleDateString("es-CL");
-      const montoFmt = datos.monto != null
-        ? `${datos.moneda || "CLP"} $${Number(datos.monto).toLocaleString("es-CL")}`
-        : "no detectado";
-
-      setPaso(chatId, "motivo", {
-        correlativo: corr, fecha,
-        monto: datos.monto, moneda: datos.moneda || "CLP",
-        comercio: datos.comercio || "", descripcion: datos.descripcion || "",
+      await pedirMotivo(id, {
+        corr,
+        fotoNombre,
+        fotoUrl,
+        fecha:    datos.fecha || new Date().toLocaleDateString("es-CL"),
+        monto:    datos.monto,
+        moneda:   datos.moneda || "CLP",
+        comercio: datos.comercio || "",
       });
 
-      await bot.sendMessage(chatId,
-        `✅ *Datos detectados:*\n\n` +
-        `📅 Fecha: ${fecha}\n` +
-        `💵 Monto: ${montoFmt}` +
-        `${datos.comercio ? `\n🏪 Comercio: ${datos.comercio}` : ""}` +
-        `${datos.descripcion ? `\n🧾 ${datos.descripcion}` : ""}\n\n` +
-        `¿Cuál es el *motivo* del gasto?\n_(ej: Alimentación, Transporte, Útiles...)_`,
-        { parse_mode: "Markdown", ...btnCancelar }
-      );
-
     } catch (err) {
-      console.error(err);
-      setPaso(chatId, "inicio");
-      bot.sendMessage(chatId, "❌ Error al procesar la imagen. Intenta de nuevo.", btnInicio);
+      await bot.deleteMessage(id, msj.message_id).catch(() => {});
+      console.error("Error:", err.response?.data || err.message);
+
+      const corr = siguienteCorr();
+      set(id, "fecha", { corr });
+      await bot.sendMessage(id,
+        "Error conectando con la IA. Ingresemos los datos manualmente.\n\nCual es la FECHA?\n(ej: 13/06/2026 o 'hoy')",
+        KB.cancelar
+      );
     }
     return;
   }
 
-  // ── Flujo de preguntas ──
-  if (s.paso === "motivo") {
-    if (!texto) return;
-    setPaso(chatId, "destino", { ...s.draft, motivo: texto });
-    return bot.sendMessage(chatId,
-      `¿Cuál es el *destino* o área?\n_(ej: Administrativo, Proyecto X, RRHH, Ventas...)_`,
-      { parse_mode: "Markdown", ...btnCancelar }
-    );
+  // ── Flujo manual ──────────────────────────────────────
+  if (cur.paso === "fecha") {
+    const fecha = txt.toLowerCase() === "hoy" ? new Date().toLocaleDateString("es-CL") : txt;
+    set(id, "monto", { ...cur.d, fecha });
+    return bot.sendMessage(id, "Cual es el MONTO? (ej: 9350)", KB.cancelar);
   }
 
-  if (s.paso === "destino") {
-    if (!texto) return;
-    setPaso(chatId, "detalle", { ...s.draft, destino: texto });
-    return bot.sendMessage(chatId,
-      `Agrega un *detalle* adicional o toca _Omitir_:`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: {
-          keyboard: [["Omitir"], ["❌ Cancelar"]],
-          resize_keyboard: true, one_time_keyboard: true
-        }
-      }
-    );
+  if (cur.paso === "monto") {
+    const monto = Number(txt.replace(/\./g, "").replace(/,/g, "."));
+    if (isNaN(monto) || monto <= 0)
+      return bot.sendMessage(id, "Escribe solo el numero (ej: 9350)");
+    set(id, "comercio", { ...cur.d, monto, moneda: "CLP" });
+    return bot.sendMessage(id, "Cual es el COMERCIO? (o Omitir)", KB.omitir);
   }
 
-  if (s.paso === "detalle") {
-    if (!texto) return;
-    const detalle = texto === "Omitir" ? "" : texto;
-    const d = { ...s.draft, detalle };
-    setPaso(chatId, "confirmar", d);
-
-    const corr     = String(d.correlativo).padStart(4, "0");
-    const montoFmt = d.monto != null ? `${d.moneda} $${Number(d.monto).toLocaleString("es-CL")}` : "—";
-
-    return bot.sendMessage(chatId,
-      `📋 *Resumen — Gasto #${corr}*\n\n` +
-      `📅 Fecha: ${d.fecha}\n` +
-      `💵 Monto: ${montoFmt}\n` +
-      `🏪 Comercio: ${d.comercio || "—"}\n` +
-      `🧾 Descripción: ${d.descripcion || "—"}\n` +
-      `🏷️ Motivo: ${d.motivo}\n` +
-      `📍 Destino: ${d.destino}\n` +
-      `📝 Detalle: ${d.detalle || "—"}\n\n` +
-      `¿Confirmar y guardar?`,
-      { parse_mode: "Markdown", ...btnConfirmar }
-    );
-  }
-
-  if (s.paso === "confirmar") {
-    if (texto === "✅ Confirmar") {
-      try {
-        const d     = s.draft;
-        const total = await agregarGasto(d);
-        avanzarCorr(d.correlativo);
-        const corr  = String(d.correlativo).padStart(4, "0");
-        resetear(chatId);
-        return bot.sendMessage(chatId,
-          `✅ *Gasto #${corr} guardado.*\n\n` +
-          `📊 Planilla con *${total} registro${total > 1 ? "s" : ""}* en total.\n\n` +
-          `Envía otra foto o escribe /planilla para recibir el Excel.`,
-          { parse_mode: "Markdown", ...btnInicio }
-        );
-      } catch (err) {
-        console.error(err);
-        return bot.sendMessage(chatId, "❌ Error al guardar. Intenta de nuevo.");
-      }
-    }
+  if (cur.paso === "comercio") {
+    await pedirMotivo(id, { ...cur.d, comercio: txt === "Omitir" ? "" : txt });
     return;
   }
 
-  // Mensaje de texto sin contexto
-  if (s.paso === "inicio") {
-    bot.sendMessage(chatId,
-      "📷 Envíame una *foto de tu boleta* para registrar un gasto.\n\nO escribe /planilla para recibir el Excel.",
-      { parse_mode: "Markdown", ...btnInicio }
+  // ── Flujo común ───────────────────────────────────────
+  if (cur.paso === "motivo") {
+    if (!txt) return;
+    set(id, "destino", { ...cur.d, motivo: txt });
+    return bot.sendMessage(id, "Cual es el DESTINO o area?\n(ej: Administrativo, Proyecto X, RRHH...)", KB.cancelar);
+  }
+
+  if (cur.paso === "destino") {
+    if (!txt) return;
+    set(id, "detalle", { ...cur.d, destino: txt });
+    return bot.sendMessage(id, "Agrega un DETALLE adicional (o Omitir)", KB.omitir);
+  }
+
+  if (cur.paso === "detalle") {
+    const d = { ...cur.d, detalle: txt === "Omitir" ? "" : txt };
+    set(id, "confirmar", d);
+    const corr = String(d.corr).padStart(4, "0");
+    const mFmt = d.monto != null ? `${d.moneda} $${Number(d.monto).toLocaleString("es-CL")}` : "-";
+    return bot.sendMessage(id,
+      `Resumen - Gasto #${corr}\n\n` +
+      `Fecha:    ${d.fecha}\n` +
+      `Monto:    ${mFmt}\n` +
+      `Comercio: ${d.comercio || "-"}\n` +
+      `Motivo:   ${d.motivo}\n` +
+      `Destino:  ${d.destino}\n` +
+      `Detalle:  ${d.detalle || "-"}\n` +
+      `Foto:     ${d.fotoNombre || "-"}\n\n` +
+      `Confirmar y guardar?`,
+      KB.confirmar
     );
+  }
+
+  if (cur.paso === "confirmar" && txt === "Confirmar") {
+    try {
+      const d     = cur.d;
+      const total = await guardarGasto(d);
+      avanzarCorr(d.corr);
+      reset(id);
+      return bot.sendMessage(id,
+        `Gasto #${String(d.corr).padStart(4,"0")} guardado!\n\n` +
+        `Planilla con ${total} registro${total > 1 ? "s" : ""} en total.\n` +
+        (d.fotoUrl ? `Foto en Drive: ${d.fotoUrl}\n` : "") +
+        `\nEnvia otra foto o escribe /planilla para el Excel.`,
+        KB.inicio
+      );
+    } catch (err) {
+      console.error("Error guardando:", err.message);
+      return bot.sendMessage(id, "Error al guardar. Intenta de nuevo o escribe /cancelar.");
+    }
+  }
+
+  if (cur.paso === "inicio") {
+    bot.sendMessage(id, "Envia una foto de boleta para registrar un gasto.\n/planilla - recibir Excel", KB.inicio);
   }
 });
 
-bot.on("polling_error", err => console.error("Polling error:", err));
-console.log("🚀 Bot de gastos iniciado");
+bot.on("polling_error", err => console.error("Polling error:", err.message));
+console.log("Bot de gastos iniciado!");

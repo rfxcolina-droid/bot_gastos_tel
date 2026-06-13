@@ -1,58 +1,67 @@
-# 🤖 Bot de Gastos Telegram — Instalación en 10 minutos
+# Bot de Gastos — Railway + Google Drive + Claude
 
-## Lo que necesitas
-- Telegram en el celular
-- Cuenta gratis en render.com
-- API key de Anthropic (console.anthropic.com)
-
----
-
-## PASO 1 — Crear tu bot en Telegram (2 minutos)
-
-1. Abre Telegram y busca **@BotFather**
-2. Escríbele: `/newbot`
-3. Ponle un nombre: ej. `Bot Gastos Empresa`
-4. Ponle un usuario: ej. `gastos_empresa_bot`
-5. BotFather te entregará un **TOKEN** así:
-   ```
-   123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
-   ⚠️ Guárdalo, lo necesitas en el Paso 3.
+## Resumen
+- Railway: servidor 24/7 gratis ($5 crédito/mes renovable)
+- Google Drive: fotos permanentes gratis (15GB)
+- Claude: lee las boletas automáticamente ($5 = ~1500 boletas)
 
 ---
 
-## PASO 2 — Subir el código a GitHub (3 minutos)
+## PASO 1 — Crear bot en Telegram (2 min)
+1. Abre Telegram → busca @BotFather
+2. Escribe `/newbot` → sigue los pasos
+3. Guarda el TOKEN que te entrega
 
-1. Ve a **github.com** y crea cuenta gratuita
-2. Haz clic en **New repository** → nombre: `bot-gastos`
+---
+
+## PASO 2 — Google Drive API (10 min)
+
+1. Ve a https://console.cloud.google.com
+2. Crea un proyecto nuevo (botón arriba a la izquierda)
+3. Busca "Google Drive API" → habilitar
+4. Ve a "Credenciales" → "Crear credenciales" → "Cuenta de servicio"
+5. Ponle nombre: `bot-gastos` → Crear
+6. Haz clic en la cuenta creada → pestaña "Claves"
+7. "Agregar clave" → "Crear clave nueva" → JSON → Descargar
+8. Abre el JSON descargado con el Bloc de notas → copia TODO el contenido
+
+9. Crea una carpeta en Google Drive llamada "Gastos Bot"
+10. Haz clic derecho → Compartir → pega el email de la cuenta de servicio
+    (está en el JSON: campo "client_email", ej: bot-gastos@proyecto.iam.gserviceaccount.com)
+11. Dale permiso de Editor → Compartir
+12. Copia el ID de la carpeta desde la URL:
+    https://drive.google.com/drive/folders/[ESTE_ES_EL_ID]
+
+---
+
+## PASO 3 — Subir a GitHub (3 min)
+
+1. Ve a github.com → crea cuenta gratuita
+2. Nuevo repositorio → nombre: `bot-gastos`
 3. Sube todos los archivos de esta carpeta
 
 ---
 
-## PASO 3 — Desplegar en Render (5 minutos)
+## PASO 4 — Desplegar en Railway (5 min)
 
-1. Ve a **render.com** → crea cuenta gratuita
-2. Haz clic en **New → Web Service**
-3. Conecta tu repositorio de GitHub
-4. Render detecta el `render.yaml` automáticamente
-5. Agrega estas variables de entorno:
-   ```
-   TELEGRAM_TOKEN     = (el token de BotFather)
-   ANTHROPIC_API_KEY  = (de console.anthropic.com)
-   ```
-6. Haz clic en **Deploy** y listo ✅
+1. Ve a railway.app → "Start a New Project"
+2. "Deploy from GitHub repo" → conecta tu repo
+3. Ve a "Variables" y agrega estas 4:
 
----
+   TELEGRAM_TOKEN
+   → el token de BotFather
 
-## PASO 4 — Usar el bot
+   ANTHROPIC_API_KEY
+   → tu key de console.anthropic.com
 
-Abre Telegram, busca tu bot por el nombre que le pusiste y escríbele:
+   GOOGLE_SERVICE_ACCOUNT_JSON
+   → pega TODO el contenido del archivo JSON descargado
+     (en una sola línea, sin saltos de línea)
 
-```
-/start
-```
+   GOOGLE_DRIVE_FOLDER_ID
+   → el ID de la carpeta de Drive del paso 2
 
-Luego envía una foto de boleta y el bot hace todo solo.
+4. Railway despliega automáticamente → el bot queda activo 24/7
 
 ---
 
@@ -61,34 +70,26 @@ Luego envía una foto de boleta y el bot hace todo solo.
 | Acción | Qué hacer |
 |--------|-----------|
 | Registrar gasto | Enviar foto de boleta |
-| Recibir Excel | Escribir `/planilla` |
-| Cancelar | Tocar ❌ Cancelar |
+| Recibir Excel | Escribir /planilla |
+| Cancelar | Tocar Cancelar |
 
-### Flujo completo:
+## Flujo completo
 ```
-Tú  →  📷 [foto boleta]
-Bot →  ✅ Fecha: 12/06/2026 | Monto: CLP $15.990 | Comercio: Jumbo
-       ¿Motivo?
-
-Tú  →  Alimentación
-Bot →  ¿Destino?
-
-Tú  →  Administrativo
-Bot →  ¿Detalle? (o Omitir)
-
-Tú  →  Omitir
-Bot →  📋 Resumen... [✅ Confirmar] [❌ Cancelar]
-
-Tú  →  ✅ Confirmar
-Bot →  ✅ Gasto #0001 guardado. Planilla con 1 registro.
-
-Tú  →  /planilla
-Bot →  📎 [Registro_Gastos.xlsx]
+Tú  → foto boleta
+Bot → Fecha: 12/06/2026 | Monto: $9.350 | Comercio: Cafe Helado
+      Cual es el MOTIVO?
+Tú  → Alimentacion
+Bot → Cual es el DESTINO?
+Tú  → Administrativo
+Bot → Detalle? (o Omitir)
+Tú  → Omitir
+Bot → Resumen... Confirmar?
+Tú  → Confirmar
+Bot → Gasto #0001 guardado!
+      Foto en Drive: https://drive.google.com/...
 ```
 
----
-
-## ⚠️ Nota sobre Render gratis
-El servidor "duerme" tras 15 min sin uso.
-El primer mensaje del día puede tardar ~30 segundos en responder.
-Para evitarlo puedes usar **Railway** (también gratis con $5 de crédito mensual).
+## Qué se guarda
+- Excel con todos los gastos acumulados (en Railway y en Drive)
+- Fotos de las boletas en Google Drive como GASTO_0001.jpg, GASTO_0002.jpg...
+- Resumen por Motivo y por Destino en el Excel
