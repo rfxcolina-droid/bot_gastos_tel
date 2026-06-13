@@ -1,5 +1,5 @@
 {
-  "name": "bot-gastos-railway",
+  "name": "bot-gastos-telegram",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": { "start": "node index.js" },
@@ -7,9 +7,7 @@
     "node-telegram-bot-api": "^0.64.0",
     "exceljs": "^4.4.0",
     "axios": "^1.6.0",
-    "dotenv": "^16.3.1",
-    "googleapis": "^140.0.0",
-    "form-data": "^4.0.0"
+    "dotenv": "^16.3.1"
   },
   "engines": { "node": ">=18.0.0" }
 }
