@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: bot-gastos-telegram
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+    disk:
+      name: datos
+      mountPath: /opt/render/project/src/datos
+      sizeGB: 1
