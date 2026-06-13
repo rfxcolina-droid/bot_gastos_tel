@@ -1,7 +1,7 @@
-
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const axios       = require("axios");
+const crypto      = require("crypto");
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
@@ -11,24 +11,22 @@ function ses(id) { if (!S[id]) S[id] = { paso: "inicio", d: {} }; return S[id]; 
 function set(id, paso, d) { S[id] = { paso, d: d !== undefined ? d : (S[id]?.d || {}) }; }
 function reset(id) { S[id] = { paso: "inicio", d: {} }; }
 
-// ── Correlativo en memoria ────────────────────────────────
 let corrActual = 1;
 
-// ── Google Sheets con cuenta de servicio ─────────────────
-async function getAccessToken() {
-  const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  const now   = Math.floor(Date.now() / 1000);
+// ── Access Token para Google ──────────────────────────────
+async function getAccessToken(scope) {
+  const creds   = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const now     = Math.floor(Date.now() / 1000);
   const header  = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({
     iss: creds.client_email,
-    scope: "https://www.googleapis.com/auth/spreadsheets",
+    scope,
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now,
   })).toString("base64url");
 
-  const crypto  = require("crypto");
-  const sign    = crypto.createSign("RSA-SHA256");
+  const sign = crypto.createSign("RSA-SHA256");
   sign.update(`${header}.${payload}`);
   const sig = sign.sign(creds.private_key, "base64url");
   const jwt = `${header}.${payload}.${sig}`;
@@ -40,8 +38,9 @@ async function getAccessToken() {
   return res.data.access_token;
 }
 
-async function agregarFila(g) {
-  const token   = await getAccessToken();
+// ── Guardar en Google Sheets ──────────────────────────────
+async function agregarFila(g, fotoUrl) {
+  const token   = await getAccessToken("https://www.googleapis.com/auth/spreadsheets");
   const sheetId = process.env.GOOGLE_SHEET_ID;
   const corr    = `GASTO_${String(g.corr).padStart(4, "0")}`;
   const values  = [[
@@ -53,15 +52,53 @@ async function agregarFila(g) {
     g.motivo     || "",
     g.destino    || "",
     g.detalle    || "",
+    fotoUrl      || "",
     new Date().toLocaleString("es-CL"),
   ]];
 
   await axios.post(
-    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Gastos!A:I:append?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Gastos!A:J:append?valueInputOption=USER_ENTERED`,
     { values },
     { headers: { Authorization: `Bearer ${token}` } }
   );
   return corr;
+}
+
+// ── Subir foto a Google Drive ─────────────────────────────
+async function subirFotoDrive(buffer, nombre) {
+  const token    = await getAccessToken("https://www.googleapis.com/auth/drive");
+  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+  // Subir archivo
+  const metadata = JSON.stringify({ name: nombre, parents: [folderId] });
+  const boundary = "foo_bar_baz";
+  const body     = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: image/jpeg\r\n\r\n`),
+    buffer,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const res = await axios.post(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink",
+    body,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+    }
+  );
+
+  const fileId = res.data.id;
+
+  // Hacer público
+  await axios.post(
+    `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
+    { role: "reader", type: "anyone" },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  return res.data.webViewLink;
 }
 
 // ── Analizar imagen con Claude ────────────────────────────
@@ -69,7 +106,8 @@ async function analizarImagen(fileId) {
   const fileInfo = await bot.getFile(fileId);
   const fileUrl  = `https://api.telegram.org/file/bot${process.env.TELEGRAM_TOKEN}/${fileInfo.file_path}`;
   const imgRes   = await axios.get(fileUrl, { responseType: "arraybuffer", timeout: 20000 });
-  const b64      = Buffer.from(imgRes.data).toString("base64");
+  const buffer   = Buffer.from(imgRes.data);
+  const b64      = buffer.toString("base64");
   const ext      = fileInfo.file_path.split(".").pop().toLowerCase();
   const mime     = { jpg:"image/jpeg", jpeg:"image/jpeg", png:"image/png", webp:"image/webp" }[ext] || "image/jpeg";
 
@@ -100,7 +138,8 @@ Usa null si no ves el dato. Si no es boleta: {"error":"no es boleta"}` }
 
   const texto = resp.data?.content?.[0]?.text || "";
   const clean = texto.replace(/```json|```/g, "").trim();
-  try { return JSON.parse(clean); } catch { return { error: "parse" }; }
+  try { return { datos: JSON.parse(clean), buffer }; }
+  catch { return { datos: { error: "parse" }, buffer }; }
 }
 
 // ── Teclados ─────────────────────────────────────────────
@@ -135,8 +174,9 @@ bot.on("message", async (msg) => {
 
   if (txt === "/planilla" || txt === "Ver planilla") {
     const sheetId = process.env.GOOGLE_SHEET_ID;
+    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
     return bot.sendMessage(id,
-      `Tu planilla de gastos:\nhttps://docs.google.com/spreadsheets/d/${sheetId}`,
+      `Tu planilla de gastos:\nhttps://docs.google.com/spreadsheets/d/${sheetId}\n\nFotos de boletas:\nhttps://drive.google.com/drive/folders/${folderId}`,
       KB.inicio
     );
   }
@@ -144,7 +184,7 @@ bot.on("message", async (msg) => {
   if (txt === "/start") {
     reset(id);
     return bot.sendMessage(id,
-      "Hola! Soy tu bot de gastos.\n\nEnvia una FOTO de boleta y registrare el gasto en Google Sheets automaticamente.\n\nComandos:\n/planilla - ver la planilla\n/cancelar - cancelar",
+      "Hola! Soy tu bot de gastos.\n\nEnvia una FOTO de boleta y registrare el gasto en Google Sheets y guardare la foto en Google Drive automaticamente.\n\nComandos:\n/planilla - ver planilla y fotos\n/cancelar - cancelar",
       KB.inicio
     );
   }
@@ -161,11 +201,11 @@ bot.on("message", async (msg) => {
         ? msg.photo[msg.photo.length - 1].file_id
         : msg.document.file_id;
 
-      const datos = await analizarImagen(fileId);
+      const { datos, buffer } = await analizarImagen(fileId);
       await bot.deleteMessage(id, msj.message_id).catch(() => {});
 
       if (datos.error) {
-        set(id, "fecha", { corr: corrActual });
+        set(id, "fecha", { corr: corrActual, buffer });
         return bot.sendMessage(id,
           "No pude leer los datos automaticamente.\n\nIngresemos manualmente.\n\nCual es la FECHA?\n(ej: 13/06/2026 o escribe 'hoy')",
           KB.cancelar
@@ -174,6 +214,7 @@ bot.on("message", async (msg) => {
 
       await pedirMotivo(id, {
         corr:     corrActual,
+        buffer,
         fecha:    datos.fecha || new Date().toLocaleDateString("es-CL"),
         monto:    datos.monto,
         moneda:   datos.moneda || "CLP",
@@ -211,7 +252,6 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  // ── Flujo común ───────────────────────────────────────
   if (cur.paso === "motivo") {
     if (!txt) return;
     set(id, "destino", { ...cur.d, motivo: txt });
@@ -237,7 +277,7 @@ bot.on("message", async (msg) => {
       `Motivo:   ${d.motivo}\n` +
       `Destino:  ${d.destino}\n` +
       `Detalle:  ${d.detalle || "-"}\n\n` +
-      `Confirmar y guardar en Google Sheets?`,
+      `Confirmar y guardar?`,
       KB.confirmar
     );
   }
@@ -245,24 +285,41 @@ bot.on("message", async (msg) => {
   if (cur.paso === "confirmar" && txt === "Confirmar") {
     try {
       const d    = cur.d;
-      const corr = await agregarFila(d);
+      const corr = String(d.corr).padStart(4, "0");
+      const nombre = `GASTO_${corr}.jpg`;
+
+      // Subir foto a Drive
+      let fotoUrl = "";
+      try {
+        fotoUrl = await subirFotoDrive(d.buffer, nombre);
+        console.log("Foto subida:", nombre);
+      } catch (e) {
+        console.error("Error subiendo foto:", e.message);
+      }
+
+      // Guardar en Sheets
+      const corrStr = await agregarFila(d, fotoUrl);
       corrActual++;
       reset(id);
-      const sheetId = process.env.GOOGLE_SHEET_ID;
+
+      const sheetId  = process.env.GOOGLE_SHEET_ID;
       return bot.sendMessage(id,
-        `${corr} guardado en Google Sheets!\n\nVer planilla:\nhttps://docs.google.com/spreadsheets/d/${sheetId}\n\nEnvia otra foto para seguir registrando.`,
+        `${corrStr} guardado!\n\n` +
+        `Foto: ${nombre}${fotoUrl ? `\n${fotoUrl}` : ""}\n\n` +
+        `Ver planilla:\nhttps://docs.google.com/spreadsheets/d/${sheetId}\n\n` +
+        `Envia otra foto para seguir registrando.`,
         KB.inicio
       );
     } catch (err) {
       console.error("Error guardando:", err.response?.data || err.message);
-      return bot.sendMessage(id, "Error al guardar en Sheets. Intenta de nuevo o escribe /cancelar.");
+      return bot.sendMessage(id, "Error al guardar. Intenta de nuevo o escribe /cancelar.");
     }
   }
 
   if (cur.paso === "inicio") {
-    bot.sendMessage(id, "Envia una foto de boleta.\n/planilla - ver Google Sheets", KB.inicio);
+    bot.sendMessage(id, "Envia una foto de boleta.\n/planilla - ver Google Sheets y Drive", KB.inicio);
   }
 });
 
 bot.on("polling_error", err => console.error("Polling error:", err.message));
-console.log("Bot iniciado con Google Sheets!");
+console.log("Bot iniciado con Google Sheets + Drive!");
