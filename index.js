@@ -57,7 +57,7 @@ async function agregarFila(g, fotoUrl) {
   const corr  = `GASTO_${String(g.corr).padStart(4, "0")}`;
   await axios.post(
     `https://sheets.googleapis.com/v4/spreadsheets/${process.env.GOOGLE_SHEET_ID}/values/Gastos!A:J:append?valueInputOption=USER_ENTERED`,
-    { values: [[corr, g.fecha||"", g.monto!=null?Number(g.monto):"", g.moneda||"CLP", g.comercio||"", g.motivo||"", g.destino||"", g.detalle||"", fotoUrl||"", new Date().toLocaleString("es-CL")]] },
+    { values: [[corr, g.fecha||"", g.motivo||"", g.destino||"", g.detalle||"", g.monto!=null?Number(g.monto):"", fotoUrl||""]] },
     { headers: { Authorization: `Bearer ${token}` } }
   );
   return corr;
