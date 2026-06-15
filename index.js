@@ -75,6 +75,44 @@ const KB_DESTINOS = {
 
 // ── Sesiones ──────────────────────────────────────────────
 const S = {};
+// Caché de correlativos por usuario (se carga desde Sheets al hacer login)
+const CORR_CACHE = {};
+
+async function obtenerUltimoCorrelativo(usuario) {
+  try {
+    const token   = await getToken();
+    const sheetId = process.env.GOOGLE_SHEET_ID;
+    // Verificar si la hoja existe
+    const infoRes = await axios.get(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties.title`,
+      { headers:{ Authorization:`Bearer ${token}` } }
+    );
+    const hojas = infoRes.data.sheets.map(h=>h.properties.title);
+    if (!hojas.includes(usuario)) return 1;
+
+    // Leer columna A (correlativos)
+    const res = await axios.get(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A:A`,
+      { headers:{ Authorization:`Bearer ${token}` } }
+    );
+    const filas = res.data.values || [];
+    let maxCorr = 0;
+    for (const fila of filas) {
+      const val = fila[0] || "";
+      // Formato GASTO_0001 o USUARIO_GASTO_0001
+      const match = val.match(/(\d{4})\.?$/);
+      if (match) {
+        const num = parseInt(match[1]);
+        if (num > maxCorr) maxCorr = num;
+      }
+    }
+    return maxCorr + 1; // Siguiente disponible
+  } catch(e) {
+    console.error("Error obteniendo correlativo:", e.message);
+    return 1;
+  }
+}
+
 function ses(id) { if (!S[id]) S[id] = { paso:"login", d:{}, usuario:null, corr:1 }; return S[id]; }
 function set(id, paso, d) { S[id] = { ...ses(id), paso, d: d !== undefined ? d : ses(id).d }; }
 function reset(id) { const u=ses(id); S[id]={ paso:"inicio", d:{}, usuario:u.usuario, corr:u.corr }; }
@@ -259,8 +297,18 @@ bot.on("message", async (msg) => {
   if (!cur.usuario) {
     if (txt==="/start") return bot.sendMessage(id,"Bienvenido al Bot de Gastos.\n\nIngresa tu codigo de acceso:",{ reply_markup:{ remove_keyboard:true } });
     if (USUARIOS[txt]) {
-      S[id] = { paso:"inicio", d:{}, usuario:USUARIOS[txt], corr:1 };
-      return bot.sendMessage(id,`Bienvenido ${USUARIOS[txt]}!\n\nEnvia una FOTO de boleta para registrar un gasto.\n\nComandos:\n/planilla - ver tu planilla\n/saltar - saltar un correlativo (queda PENDIENTE)\n/agregar 0003 - completar un gasto pendiente\n/salir - cerrar sesion`,KB.inicio);
+      const nombreUsuario = USUARIOS[txt];
+      S[id] = { paso:"inicio", d:{}, usuario:nombreUsuario, corr:1 };
+      // Cargar último correlativo desde Sheets
+      bot.sendMessage(id, `Bienvenido ${nombreUsuario}! Cargando tu planilla...`);
+      try {
+        const ultimoCorr = await obtenerUltimoCorrelativo(nombreUsuario);
+        S[id].corr = ultimoCorr;
+        console.log(`Usuario ${nombreUsuario} - próximo correlativo: ${ultimoCorr}`);
+      } catch(e) {
+        console.error("Error cargando correlativo:", e.message);
+      }
+      return bot.sendMessage(id,`Listo! Tu proximo gasto sera GASTO_${String(S[id].corr).padStart(4,"0")}\n\nEnvia una FOTO de boleta para registrar.\n\nComandos:\n/planilla - ver tu planilla\n/saltar - saltar un correlativo (queda PENDIENTE)\n/agregar 0003 - completar un gasto pendiente\n/salir - cerrar sesion`,KB.inicio);
     }
     return bot.sendMessage(id,"Codigo incorrecto. Intenta nuevamente:");
   }
