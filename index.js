@@ -19,13 +19,14 @@ const USUARIOS = {
 };
 
 // ── Motivos ───────────────────────────────────────────────
+// Para agregar/editar motivos, modifica este arreglo
 const MOTIVOS = [
-  "Alimentacion",
-  "Combustible",
-  "Materiales",
-  "Herramientas",
-  "Peaje",
-  // "Motivo6",
+  "Alimentacion",   // Motivo 1
+  "Combustible",    // Motivo 2
+  "Materiales",     // Motivo 3
+  "Herramientas",   // Motivo 4
+  "Peaje",          // Motivo 5
+  // "Motivo6",     // Descomenta para agregar
   // "Motivo7",
   // "Motivo8",
   // "Motivo9",
@@ -38,7 +39,34 @@ const KB_MOTIVOS = {
       [MOTIVOS[0], MOTIVOS[1]],
       [MOTIVOS[2], MOTIVOS[3]],
       [MOTIVOS[4], "Otro motivo..."],
-      ["Cancelar"]
+      ["❌ Cancelar"]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true
+  }
+};
+
+// ── Destinos ──────────────────────────────────────────────
+// Para agregar/editar destinos, modifica este arreglo
+const DESTINOS = [
+  "PFV Los Quilos",    // Destino 1
+  "PFV Las Violetas",  // Destino 2
+  "PFV San Ramon",     // Destino 3
+  // "Destino4",       // Descomenta para agregar
+  // "Destino5",
+  // "Destino6",
+  // "Destino7",
+  // "Destino8",
+];
+
+const KB_DESTINOS = {
+  reply_markup: {
+    keyboard: [
+      [DESTINOS[0]],
+      [DESTINOS[1]],
+      [DESTINOS[2]],
+      // Agrega más filas aquí si agregas destinos
+      ["Otro destino...", "❌ Cancelar"]
     ],
     resize_keyboard: true,
     one_time_keyboard: true
@@ -342,19 +370,31 @@ bot.on("message", async (msg) => {
       return bot.sendMessage(id,"Escribe el motivo:",KB.cancelar);
     }
     set(id,"destino",{...cur.d,motivo:txt});
-    return bot.sendMessage(id,"Cual es el DESTINO?\n(ej: Administrativo, Proyecto X, RRHH...)",KB.cancelar);
+    return bot.sendMessage(id,"Selecciona el DESTINO:",KB_DESTINOS);
   }
   if (cur.paso==="motivo_manual") {
     if (!txt) return;
     set(id,"destino",{...cur.d,motivo:txt});
-    return bot.sendMessage(id,"Cual es el DESTINO?\n(ej: Administrativo, Proyecto X, RRHH...)",KB.cancelar);
+    return bot.sendMessage(id,"Selecciona el DESTINO:",KB_DESTINOS);
   }
 
   if (cur.paso==="destino") {
     if (!txt) return;
+    if (txt==="Otro destino...") {
+      set(id,"destino_manual",cur.d);
+      return bot.sendMessage(id,"Escribe el destino:",KB.cancelar);
+    }
     set(id,"detalle",{...cur.d,destino:txt});
     return bot.sendMessage(id,
       "Agrega un DETALLE adicional.\n\nEscribe el detalle o toca Omitir.\n(Tip: puedes escribir varias lineas antes de enviar)",
+      KB.omitir
+    );
+  }
+  if (cur.paso==="destino_manual") {
+    if (!txt) return;
+    set(id,"detalle",{...cur.d,destino:txt});
+    return bot.sendMessage(id,
+      "Agrega un DETALLE adicional.\n\nEscribe el detalle o toca Omitir.",
       KB.omitir
     );
   }
@@ -400,7 +440,7 @@ bot.on("message", async (msg) => {
     if (txt==="✏️ Monto")    { set(id,"editando_monto",cur.d);    return bot.sendMessage(id,"Nuevo MONTO:\n(ej: 9350)",KB.cancelar); }
     if (txt==="✏️ Comercio") { set(id,"editando_comercio",cur.d); return bot.sendMessage(id,"Nuevo COMERCIO:\n(o Omitir)",KB.omitir); }
     if (txt==="✏️ Motivo")   { set(id,"editando_motivo",cur.d);   return bot.sendMessage(id,"Selecciona el nuevo MOTIVO:",KB_MOTIVOS); }
-    if (txt==="✏️ Destino")  { set(id,"editando_destino",cur.d);  return bot.sendMessage(id,"Nuevo DESTINO:",KB.cancelar); }
+    if (txt==="✏️ Destino")  { set(id,"editando_destino",cur.d);  return bot.sendMessage(id,"Selecciona el nuevo DESTINO:",KB_DESTINOS); }
     if (txt==="✏️ Detalle")  { set(id,"editando_detalle",cur.d);  return bot.sendMessage(id,"Nuevo DETALLE:\n(o Omitir)",KB.omitir); }
   }
 
@@ -413,7 +453,11 @@ bot.on("message", async (msg) => {
     set(id,"pre_resumen",{...cur.d,motivo:txt}); await mostrarResumen(id); return;
   }
   if (cur.paso==="editando_motivo_manual") { set(id,"pre_resumen",{...cur.d,motivo:txt}); await mostrarResumen(id); return; }
-  if (cur.paso==="editando_destino")  { set(id,"pre_resumen",{...cur.d,destino:txt}); await mostrarResumen(id); return; }
+  if (cur.paso==="editando_destino") {
+    if (txt==="Otro destino...") { set(id,"editando_destino_manual",cur.d); return bot.sendMessage(id,"Escribe el destino:",KB.cancelar); }
+    set(id,"pre_resumen",{...cur.d,destino:txt}); await mostrarResumen(id); return;
+  }
+  if (cur.paso==="editando_destino_manual") { set(id,"pre_resumen",{...cur.d,destino:txt}); await mostrarResumen(id); return; }
   if (cur.paso==="editando_detalle")  { set(id,"pre_resumen",{...cur.d,detalle:txt==="Omitir"?"":txt}); await mostrarResumen(id); return; }
 
   if (cur.paso==="inicio") bot.sendMessage(id,"Envia una foto de boleta.\n/planilla - ver tu planilla",KB.inicio);
