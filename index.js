@@ -18,6 +18,33 @@ const USUARIOS = {
   // "CODIGO8": "Nombre8",
 };
 
+// ── Motivos ───────────────────────────────────────────────
+const MOTIVOS = [
+  "Alimentacion",
+  "Combustible",
+  "Materiales",
+  "Herramientas",
+  "Peaje",
+  // "Motivo6",
+  // "Motivo7",
+  // "Motivo8",
+  // "Motivo9",
+  // "Motivo10",
+];
+
+const KB_MOTIVOS = {
+  reply_markup: {
+    keyboard: [
+      [MOTIVOS[0], MOTIVOS[1]],
+      [MOTIVOS[2], MOTIVOS[3]],
+      [MOTIVOS[4], "Otro motivo..."],
+      ["Cancelar"]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true
+  }
+};
+
 // ── Sesiones ──────────────────────────────────────────────
 const S = {};
 function ses(id) { if (!S[id]) S[id] = { paso:"login", d:{}, usuario:null, corr:1 }; return S[id]; }
@@ -27,7 +54,7 @@ function reset(id) { const u=ses(id); S[id]={ paso:"inicio", d:{}, usuario:u.usu
 // ── Cloudinary ────────────────────────────────────────────
 async function subirCloudinary(buffer, nombre) {
   const form = new FormData();
-  form.append("file", buffer, { filename: nombre, contentType:"image/jpeg" });
+  form.append("file", buffer, { filename:nombre, contentType:"image/jpeg" });
   form.append("upload_preset", process.env.CLOUDINARY_UPLOAD_PRESET);
   form.append("public_id", nombre.replace(".jpg",""));
   const res = await axios.post(
@@ -111,19 +138,20 @@ Usa null si no ves el dato. Si no es boleta: {"error":"no es boleta"}` }
   catch { return { datos:{ error:"parse" }, buffer:buf }; }
 }
 
-// ── Mostrar resumen con foto y opciones de edición ────────
+// ── Mostrar resumen ───────────────────────────────────────
 async function mostrarResumen(id) {
   const cur  = ses(id);
   const d    = cur.d;
   const corr = String(d.corr).padStart(4,"0");
   const mFmt = d.monto!=null ? `${d.moneda||"CLP"} $${Number(d.monto).toLocaleString("es-CL")}` : "-";
 
-  // Enviar foto primero
+  // Enviar foto con link
   if (d.buffer) {
-    await bot.sendPhoto(id, d.buffer, { caption: `Foto del gasto #${corr}` });
+    await bot.sendPhoto(id, d.buffer, {
+      caption: `Foto del gasto #${corr}\n\nVerifica que sea la foto correcta antes de confirmar.`
+    });
   }
 
-  // Mostrar resumen con botones de edición
   await bot.sendMessage(id,
     `Resumen - Gasto #${corr}\nUsuario: ${cur.usuario}\n\n` +
     `📅 Fecha:    ${d.fecha||"-"}\n` +
@@ -132,15 +160,15 @@ async function mostrarResumen(id) {
     `🏷️ Motivo:   ${d.motivo||"-"}\n` +
     `📍 Destino:  ${d.destino||"-"}\n` +
     `📝 Detalle:  ${d.detalle||"-"}\n\n` +
-    `Confirma o edita algun dato:`,
+    `Confirma o toca el campo que quieres editar:`,
     {
       reply_markup: {
         keyboard: [
-          ["Confirmar"],
-          ["Editar Fecha",    "Editar Monto"],
-          ["Editar Comercio", "Editar Motivo"],
-          ["Editar Destino",  "Editar Detalle"],
-          ["Cancelar"]
+          ["✅ Confirmar"],
+          ["✏️ Fecha",    "✏️ Monto"],
+          ["✏️ Comercio", "✏️ Motivo"],
+          ["✏️ Destino",  "✏️ Detalle"],
+          ["❌ Cancelar"]
         ],
         resize_keyboard: true,
         one_time_keyboard: true
@@ -152,19 +180,10 @@ async function mostrarResumen(id) {
 
 // ── Teclados ──────────────────────────────────────────────
 const KB = {
-  cancelar: { reply_markup:{ keyboard:[["Cancelar"]], resize_keyboard:true } },
-  omitir:   { reply_markup:{ keyboard:[["Omitir","Cancelar"]], resize_keyboard:true, one_time_keyboard:true } },
-  inicio:   { reply_markup:{ keyboard:[["Ver planilla"]], resize_keyboard:true } },
+  cancelar: { reply_markup:{ keyboard:[["❌ Cancelar"]], resize_keyboard:true } },
+  omitir:   { reply_markup:{ keyboard:[["Omitir","❌ Cancelar"]], resize_keyboard:true, one_time_keyboard:true } },
+  inicio:   { reply_markup:{ keyboard:[["📊 Ver planilla"]], resize_keyboard:true } },
 };
-
-async function pedirMotivo(id, draft) {
-  const mFmt = draft.monto!=null ? `${draft.moneda||"CLP"} $${Number(draft.monto).toLocaleString("es-CL")}` : "no detectado";
-  set(id,"motivo",draft);
-  await bot.sendMessage(id,
-    `Datos detectados:\n\nFecha: ${draft.fecha||"no detectada"}\nMonto: ${mFmt}${draft.comercio?`\nComercio: ${draft.comercio}`:""}\n\nCual es el MOTIVO del gasto?\n(ej: Alimentacion, Transporte, Utiles...)`,
-    KB.cancelar
-  );
-}
 
 // ── Manejador ─────────────────────────────────────────────
 bot.on("message", async (msg) => {
@@ -183,9 +202,9 @@ bot.on("message", async (msg) => {
   }
 
   // ── Comandos globales ────────────────────────────────
-  if (txt==="/salir") { S[id]={ paso:"login", d:{}, usuario:null, corr:1 }; return bot.sendMessage(id,"Sesion cerrada. Escribe /start para volver.",{ reply_markup:{ remove_keyboard:true } }); }
-  if (txt==="Cancelar"||txt==="/cancelar") { reset(id); return bot.sendMessage(id,"Cancelado.",KB.inicio); }
-  if (txt==="/planilla"||txt==="Ver planilla") return bot.sendMessage(id,`Tu planilla (hoja: ${cur.usuario}):\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}`,KB.inicio);
+  if (txt==="/salir") { S[id]={ paso:"login", d:{}, usuario:null, corr:1 }; return bot.sendMessage(id,"Sesion cerrada.",{ reply_markup:{ remove_keyboard:true } }); }
+  if (txt==="❌ Cancelar"||txt==="Cancelar"||txt==="/cancelar") { reset(id); return bot.sendMessage(id,"Cancelado.",KB.inicio); }
+  if (txt==="/planilla"||txt==="📊 Ver planilla") return bot.sendMessage(id,`Tu planilla (hoja: ${cur.usuario}):\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}`,KB.inicio);
 
   // ── Foto ─────────────────────────────────────────────
   if (msg.photo||msg.document?.mime_type?.startsWith("image/")) {
@@ -197,9 +216,15 @@ bot.on("message", async (msg) => {
       await bot.deleteMessage(id,msj.message_id).catch(()=>{});
       if (datos.error) {
         set(id,"fecha",{ corr:cur.corr, buffer });
-        return bot.sendMessage(id,"No pude leer los datos.\n\nCual es la FECHA?\n(ej: 13/06/2026 o 'hoy')",KB.cancelar);
+        return bot.sendMessage(id,"No pude leer los datos automaticamente.\n\nCual es la FECHA?\n(ej: 13/06/2026 o 'hoy')",KB.cancelar);
       }
-      await pedirMotivo(id,{ corr:cur.corr, buffer, fecha:datos.fecha||new Date().toLocaleDateString("es-CL"), monto:datos.monto, moneda:datos.moneda||"CLP", comercio:datos.comercio||"" });
+      // Ir directo a motivo con menú
+      set(id,"motivo",{ corr:cur.corr, buffer, fecha:datos.fecha||new Date().toLocaleDateString("es-CL"), monto:datos.monto, moneda:datos.moneda||"CLP", comercio:datos.comercio||"" });
+      const mFmt = datos.monto!=null ? `${datos.moneda||"CLP"} $${Number(datos.monto).toLocaleString("es-CL")}` : "no detectado";
+      await bot.sendMessage(id,
+        `Datos detectados:\n📅 Fecha: ${datos.fecha||"no detectada"}\n💵 Monto: ${mFmt}${datos.comercio?`\n🏪 Comercio: ${datos.comercio}`:""}\n\nSelecciona el MOTIVO:`,
+        KB_MOTIVOS
+      );
     } catch(err) {
       await bot.deleteMessage(id,msj.message_id).catch(()=>{});
       console.error("Error IA:",err.response?.data||err.message);
@@ -210,52 +235,100 @@ bot.on("message", async (msg) => {
   }
 
   // ── Flujo manual ─────────────────────────────────────
-  if (cur.paso==="fecha") { const f=txt.toLowerCase()==="hoy"?new Date().toLocaleDateString("es-CL"):txt; set(id,"monto",{...cur.d,fecha:f}); return bot.sendMessage(id,"Cual es el MONTO? (ej: 9350)",KB.cancelar); }
-  if (cur.paso==="monto") { const m=Number(txt.replace(/\./g,"").replace(/,/g,".")); if(isNaN(m)||m<=0) return bot.sendMessage(id,"Escribe solo el numero (ej: 9350)"); set(id,"comercio",{...cur.d,monto:m,moneda:"CLP"}); return bot.sendMessage(id,"Cual es el COMERCIO? (o Omitir)",KB.omitir); }
-  if (cur.paso==="comercio") { await pedirMotivo(id,{...cur.d,comercio:txt==="Omitir"?"":txt}); return; }
-  if (cur.paso==="motivo") { if(!txt)return; set(id,"destino",{...cur.d,motivo:txt}); return bot.sendMessage(id,"Cual es el DESTINO?\n(ej: Administrativo, Proyecto X, RRHH...)",KB.cancelar); }
-  if (cur.paso==="destino") { if(!txt)return; set(id,"detalle",{...cur.d,destino:txt}); return bot.sendMessage(id,"Agrega un DETALLE (o Omitir)",KB.omitir); }
-  if (cur.paso==="detalle") { await mostrarResumen(id); return; }
+  if (cur.paso==="fecha") {
+    const f = txt.toLowerCase()==="hoy"?new Date().toLocaleDateString("es-CL"):txt;
+    set(id,"monto",{...cur.d,fecha:f});
+    return bot.sendMessage(id,"Cual es el MONTO? (ej: 9350)",KB.cancelar);
+  }
+  if (cur.paso==="monto") {
+    const m = Number(txt.replace(/\./g,"").replace(/,/g,"."));
+    if(isNaN(m)||m<=0) return bot.sendMessage(id,"Escribe solo el numero (ej: 9350)");
+    set(id,"comercio",{...cur.d,monto:m,moneda:"CLP"});
+    return bot.sendMessage(id,"Cual es el COMERCIO? (o Omitir)",KB.omitir);
+  }
+  if (cur.paso==="comercio") {
+    set(id,"motivo",{...cur.d,comercio:txt==="Omitir"?"":txt});
+    return bot.sendMessage(id,"Selecciona el MOTIVO:",KB_MOTIVOS);
+  }
 
-  // ── Edición de campos ─────────────────────────────────
+  // ── Motivo con menú ───────────────────────────────────
+  if (cur.paso==="motivo") {
+    if (!txt) return;
+    if (txt==="Otro motivo...") {
+      set(id,"motivo_manual",cur.d);
+      return bot.sendMessage(id,"Escribe el motivo:",KB.cancelar);
+    }
+    set(id,"destino",{...cur.d,motivo:txt});
+    return bot.sendMessage(id,"Cual es el DESTINO?\n(ej: Administrativo, Proyecto X, RRHH...)",KB.cancelar);
+  }
+  if (cur.paso==="motivo_manual") {
+    if (!txt) return;
+    set(id,"destino",{...cur.d,motivo:txt});
+    return bot.sendMessage(id,"Cual es el DESTINO?\n(ej: Administrativo, Proyecto X, RRHH...)",KB.cancelar);
+  }
+
+  if (cur.paso==="destino") {
+    if (!txt) return;
+    set(id,"detalle",{...cur.d,destino:txt});
+    return bot.sendMessage(id,
+      "Agrega un DETALLE adicional.\n\nEscribe el detalle o toca Omitir.\n(Tip: puedes escribir varias lineas antes de enviar)",
+      KB.omitir
+    );
+  }
+  if (cur.paso==="detalle") {
+    // Guardar detalle y mostrar resumen — NO borrar
+    const d = {...cur.d, detalle:txt==="Omitir"?"":txt};
+    set(id,"pre_resumen",d);
+    await mostrarResumen(id);
+    return;
+  }
+
+  // ── Confirmar / Editar ────────────────────────────────
   if (cur.paso==="confirmar") {
-    if (txt==="Confirmar") {
+    if (txt==="✅ Confirmar") {
       try {
         const d      = cur.d;
         const corr   = String(d.corr).padStart(4,"0");
         const nombre = `${cur.usuario}_GASTO_${corr}.jpg`;
         let fotoUrl  = "";
-        try { fotoUrl=await subirCloudinary(d.buffer,nombre); console.log("Foto subida:",nombre); }
+        try { fotoUrl=await subirCloudinary(d.buffer,nombre); }
         catch(e) { console.error("Error Cloudinary:",e.response?.data||e.message); }
         const corrStr = await agregarFila(d,fotoUrl,cur.usuario);
         S[id].corr++;
         reset(id);
-        return bot.sendMessage(id,`${corrStr} guardado!\n\nVer planilla:\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}\n\nEnvia otra foto para seguir registrando.`,KB.inicio);
+        return bot.sendMessage(id,
+          `✅ ${corrStr} guardado en tu planilla!\n\n📊 Ver planilla:\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}\n\nEnvia otra foto para seguir registrando.`,
+          KB.inicio
+        );
       } catch(err) {
-        console.error("Error guardando:",err.response?.data||err.message);
+        console.error("Error:",err.response?.data||err.message);
         return bot.sendMessage(id,"Error al guardar. Escribe /cancelar e intenta de nuevo.");
       }
     }
 
-    // Editar campos
-    if (txt==="Editar Fecha")    { set(id,"editando_fecha",cur.d);    return bot.sendMessage(id,"Escribe la nueva FECHA:\n(ej: 13/06/2026 o 'hoy')",KB.cancelar); }
-    if (txt==="Editar Monto")    { set(id,"editando_monto",cur.d);    return bot.sendMessage(id,"Escribe el nuevo MONTO:\n(ej: 9350)",KB.cancelar); }
-    if (txt==="Editar Comercio") { set(id,"editando_comercio",cur.d); return bot.sendMessage(id,"Escribe el nuevo COMERCIO:\n(o Omitir)",KB.omitir); }
-    if (txt==="Editar Motivo")   { set(id,"editando_motivo",cur.d);   return bot.sendMessage(id,"Escribe el nuevo MOTIVO:",KB.cancelar); }
-    if (txt==="Editar Destino")  { set(id,"editando_destino",cur.d);  return bot.sendMessage(id,"Escribe el nuevo DESTINO:",KB.cancelar); }
-    if (txt==="Editar Detalle")  { set(id,"editando_detalle",cur.d);  return bot.sendMessage(id,"Escribe el nuevo DETALLE:\n(o Omitir)",KB.omitir); }
+    // Botones de edición
+    if (txt==="✏️ Fecha")    { set(id,"editando_fecha",cur.d);    return bot.sendMessage(id,"Nueva FECHA:\n(ej: 13/06/2026 o 'hoy')",KB.cancelar); }
+    if (txt==="✏️ Monto")    { set(id,"editando_monto",cur.d);    return bot.sendMessage(id,"Nuevo MONTO:\n(ej: 9350)",KB.cancelar); }
+    if (txt==="✏️ Comercio") { set(id,"editando_comercio",cur.d); return bot.sendMessage(id,"Nuevo COMERCIO:\n(o Omitir)",KB.omitir); }
+    if (txt==="✏️ Motivo")   { set(id,"editando_motivo",cur.d);   return bot.sendMessage(id,"Selecciona el nuevo MOTIVO:",KB_MOTIVOS); }
+    if (txt==="✏️ Destino")  { set(id,"editando_destino",cur.d);  return bot.sendMessage(id,"Nuevo DESTINO:",KB.cancelar); }
+    if (txt==="✏️ Detalle")  { set(id,"editando_detalle",cur.d);  return bot.sendMessage(id,"Nuevo DETALLE:\n(o Omitir)",KB.omitir); }
   }
 
-  // ── Guardar ediciones y volver al resumen ─────────────
-  if (cur.paso==="editando_fecha")    { const f=txt.toLowerCase()==="hoy"?new Date().toLocaleDateString("es-CL"):txt; set(id,"detalle",{...cur.d,fecha:f}); await mostrarResumen(id); return; }
-  if (cur.paso==="editando_monto")    { const m=Number(txt.replace(/\./g,"").replace(/,/g,".")); if(isNaN(m)||m<=0) return bot.sendMessage(id,"Escribe solo el numero (ej: 9350)"); set(id,"detalle",{...cur.d,monto:m}); await mostrarResumen(id); return; }
-  if (cur.paso==="editando_comercio") { set(id,"detalle",{...cur.d,comercio:txt==="Omitir"?"":txt}); await mostrarResumen(id); return; }
-  if (cur.paso==="editando_motivo")   { set(id,"detalle",{...cur.d,motivo:txt}); await mostrarResumen(id); return; }
-  if (cur.paso==="editando_destino")  { set(id,"detalle",{...cur.d,destino:txt}); await mostrarResumen(id); return; }
-  if (cur.paso==="editando_detalle")  { set(id,"detalle",{...cur.d,detalle:txt==="Omitir"?"":txt}); await mostrarResumen(id); return; }
+  // ── Guardar ediciones ─────────────────────────────────
+  if (cur.paso==="editando_fecha")    { const f=txt.toLowerCase()==="hoy"?new Date().toLocaleDateString("es-CL"):txt; set(id,"pre_resumen",{...cur.d,fecha:f}); await mostrarResumen(id); return; }
+  if (cur.paso==="editando_monto")    { const m=Number(txt.replace(/\./g,"").replace(/,/g,".")); if(isNaN(m)||m<=0) return bot.sendMessage(id,"Escribe solo el numero (ej: 9350)"); set(id,"pre_resumen",{...cur.d,monto:m}); await mostrarResumen(id); return; }
+  if (cur.paso==="editando_comercio") { set(id,"pre_resumen",{...cur.d,comercio:txt==="Omitir"?"":txt}); await mostrarResumen(id); return; }
+  if (cur.paso==="editando_motivo")   {
+    if (txt==="Otro motivo...") { set(id,"editando_motivo_manual",cur.d); return bot.sendMessage(id,"Escribe el motivo:",KB.cancelar); }
+    set(id,"pre_resumen",{...cur.d,motivo:txt}); await mostrarResumen(id); return;
+  }
+  if (cur.paso==="editando_motivo_manual") { set(id,"pre_resumen",{...cur.d,motivo:txt}); await mostrarResumen(id); return; }
+  if (cur.paso==="editando_destino")  { set(id,"pre_resumen",{...cur.d,destino:txt}); await mostrarResumen(id); return; }
+  if (cur.paso==="editando_detalle")  { set(id,"pre_resumen",{...cur.d,detalle:txt==="Omitir"?"":txt}); await mostrarResumen(id); return; }
 
   if (cur.paso==="inicio") bot.sendMessage(id,"Envia una foto de boleta.\n/planilla - ver tu planilla",KB.inicio);
 });
 
 bot.on("polling_error", err=>console.error("Polling error:",err.message));
-console.log("Bot iniciado con edicion de datos!");
+console.log("Bot iniciado!");
