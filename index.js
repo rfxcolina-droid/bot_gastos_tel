@@ -102,6 +102,42 @@ async function asegurarHoja(token, sheetId, hoja) {
   }
 }
 
+async function actualizarFilaPendiente(g, fotoUrl, usuario) {
+  const token   = await getToken();
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const corrStr = `GASTO_${String(g.corr).padStart(4,"0")}`;
+
+  // Buscar la fila con ese correlativo
+  const res = await axios.get(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A:A`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  const filas = res.data.values || [];
+  let filaIdx = -1;
+  for (let i=0; i<filas.length; i++) {
+    if (filas[i][0] === corrStr) { filaIdx = i+1; break; }
+  }
+
+  const valores = [corrStr, g.fecha||"", g.motivo||"", g.destino||"", g.detalle||"", g.monto!=null?Number(g.monto):"", fotoUrl||""];
+
+  if (filaIdx > 0) {
+    // Actualizar fila existente
+    await axios.put(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A${filaIdx}:G${filaIdx}?valueInputOption=USER_ENTERED`,
+      { values:[valores] },
+      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
+    );
+  } else {
+    // No encontró la fila, agregar nueva
+    await axios.post(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A:G:append?valueInputOption=USER_ENTERED`,
+      { values:[valores] },
+      { headers:{ Authorization:`Bearer ${token}` } }
+    );
+  }
+  return corrStr;
+}
+
 async function agregarFila(g, fotoUrl, usuario) {
   const token   = await getToken();
   const sheetId = process.env.GOOGLE_SHEET_ID;
@@ -196,7 +232,7 @@ bot.on("message", async (msg) => {
     if (txt==="/start") return bot.sendMessage(id,"Bienvenido al Bot de Gastos.\n\nIngresa tu codigo de acceso:",{ reply_markup:{ remove_keyboard:true } });
     if (USUARIOS[txt]) {
       S[id] = { paso:"inicio", d:{}, usuario:USUARIOS[txt], corr:1 };
-      return bot.sendMessage(id,`Bienvenido ${USUARIOS[txt]}!\n\nEnvia una FOTO de boleta para registrar un gasto.\n\n/planilla - ver tu planilla\n/salir - cerrar sesion`,KB.inicio);
+      return bot.sendMessage(id,`Bienvenido ${USUARIOS[txt]}!\n\nEnvia una FOTO de boleta para registrar un gasto.\n\nComandos:\n/planilla - ver tu planilla\n/saltar - saltar un correlativo (queda PENDIENTE)\n/agregar 0003 - completar un gasto pendiente\n/salir - cerrar sesion`,KB.inicio);
     }
     return bot.sendMessage(id,"Codigo incorrecto. Intenta nuevamente:");
   }
@@ -206,29 +242,76 @@ bot.on("message", async (msg) => {
   if (txt==="❌ Cancelar"||txt==="Cancelar"||txt==="/cancelar") { reset(id); return bot.sendMessage(id,"Cancelado.",KB.inicio); }
   if (txt==="/planilla"||txt==="📊 Ver planilla") return bot.sendMessage(id,`Tu planilla (hoja: ${cur.usuario}):\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}`,KB.inicio);
 
+  // Agregar gasto pendiente: /agregar 0003
+  if (txt.startsWith("/agregar")) {
+    if (cur.paso !== "inicio") return bot.sendMessage(id,"Cancela la operacion actual primero con /cancelar",KB.cancelar);
+    const partes = txt.split(" ");
+    if (partes.length < 2 || isNaN(Number(partes[1]))) {
+      return bot.sendMessage(id,"Uso: /agregar NUMERO\nEjemplo: /agregar 0003\n\nEsto te permite completar un gasto pendiente o anterior.");
+    }
+    const numPendiente = Number(partes[1]);
+    set(id, "foto_pendiente", { ...cur.d, corrPendiente: numPendiente });
+    return bot.sendMessage(id,
+      `Vas a completar el gasto GASTO_${String(numPendiente).padStart(4,"0")}.\n\nEnvia la foto de esa boleta:`,
+      KB.cancelar
+    );
+  }
+
+  // Saltar correlativo
+  if (txt==="/saltar") {
+    if (cur.paso !== "inicio") return bot.sendMessage(id,"Cancela la operacion actual primero con /cancelar",KB.cancelar);
+    const corrSaltado = cur.corr;
+    S[id].corr++;
+    try {
+      const token   = await getToken();
+      const sheetId = process.env.GOOGLE_SHEET_ID;
+      await asegurarHoja(token, sheetId, cur.usuario);
+      const corrStr = `GASTO_${String(corrSaltado).padStart(4,"0")}`;
+      await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${cur.usuario}!A:G:append?valueInputOption=USER_ENTERED`,
+        { values:[[corrStr, "", "", "", "*** PENDIENTE ***", "", ""]] },
+        { headers:{ Authorization:`Bearer ${token}` } }
+      );
+      return bot.sendMessage(id,
+        `⏭️ ${corrStr} reservado como PENDIENTE en la planilla.\n\nCompleta los datos despues editando directamente en Google Sheets.\n\nEl proximo gasto sera GASTO_${String(S[id].corr).padStart(4,"0")}.\n\nEnvia una foto para continuar.`,
+        KB.inicio
+      );
+    } catch(err) {
+      S[id].corr--;
+      console.error("Error saltando:", err.message);
+      return bot.sendMessage(id,"Error al reservar el correlativo. Intenta de nuevo.");
+    }
+  }
+
   // ── Foto ─────────────────────────────────────────────
   if (msg.photo||msg.document?.mime_type?.startsWith("image/")) {
-    if (cur.paso!=="inicio") return bot.sendMessage(id,"Escribe Cancelar primero.",KB.cancelar);
+    // Modo agregar pendiente
+    const esPendiente = cur.paso === "foto_pendiente";
+    if (!esPendiente && cur.paso!=="inicio") return bot.sendMessage(id,"Escribe Cancelar primero.",KB.cancelar);
     const msj = await bot.sendMessage(id,"Leyendo boleta con IA...");
     try {
       const fid = msg.photo ? msg.photo[msg.photo.length-1].file_id : msg.document.file_id;
       const { datos, buffer } = await analizarImagen(fid);
       await bot.deleteMessage(id,msj.message_id).catch(()=>{});
+      // Usar correlativo pendiente o el actual
+      const corrUsado = esPendiente ? cur.d.corrPendiente : cur.corr;
       if (datos.error) {
-        set(id,"fecha",{ corr:cur.corr, buffer });
+        set(id,"fecha",{ corr:corrUsado, buffer, esPendiente });
         return bot.sendMessage(id,"No pude leer los datos automaticamente.\n\nCual es la FECHA?\n(ej: 13/06/2026 o 'hoy')",KB.cancelar);
       }
       // Ir directo a motivo con menú
-      set(id,"motivo",{ corr:cur.corr, buffer, fecha:datos.fecha||new Date().toLocaleDateString("es-CL"), monto:datos.monto, moneda:datos.moneda||"CLP", comercio:datos.comercio||"" });
+      set(id,"motivo",{ corr:corrUsado, buffer, esPendiente, fecha:datos.fecha||new Date().toLocaleDateString("es-CL"), monto:datos.monto, moneda:datos.moneda||"CLP", comercio:datos.comercio||"" });
       const mFmt = datos.monto!=null ? `${datos.moneda||"CLP"} $${Number(datos.monto).toLocaleString("es-CL")}` : "no detectado";
+      const corrStr2 = `GASTO_${String(corrUsado).padStart(4,"0")}`;
       await bot.sendMessage(id,
-        `Datos detectados:\n📅 Fecha: ${datos.fecha||"no detectada"}\n💵 Monto: ${mFmt}${datos.comercio?`\n🏪 Comercio: ${datos.comercio}`:""}\n\nSelecciona el MOTIVO:`,
+        `${esPendiente?`Completando ${corrStr2}\n`:""}Datos detectados:\n📅 Fecha: ${datos.fecha||"no detectada"}\n💵 Monto: ${mFmt}${datos.comercio?`\n🏪 Comercio: ${datos.comercio}`:""}\n\nSelecciona el MOTIVO:`,
         KB_MOTIVOS
       );
     } catch(err) {
       await bot.deleteMessage(id,msj.message_id).catch(()=>{});
       console.error("Error IA:",err.response?.data||err.message);
-      set(id,"fecha",{ corr:cur.corr });
+      const corrUsado2 = esPendiente ? cur.d.corrPendiente : cur.corr;
+      set(id,"fecha",{ corr:corrUsado2, esPendiente });
       await bot.sendMessage(id,"Error con la IA. Ingresemos manualmente.\n\nCual es la FECHA?\n(ej: 13/06/2026 o 'hoy')",KB.cancelar);
     }
     return;
@@ -293,8 +376,14 @@ bot.on("message", async (msg) => {
         let fotoUrl  = "";
         try { fotoUrl=await subirCloudinary(d.buffer,nombre); }
         catch(e) { console.error("Error Cloudinary:",e.response?.data||e.message); }
-        const corrStr = await agregarFila(d,fotoUrl,cur.usuario);
-        S[id].corr++;
+        let corrStr;
+        if (d.esPendiente) {
+          // Buscar y actualizar la fila pendiente
+          corrStr = await actualizarFilaPendiente(d, fotoUrl, cur.usuario);
+        } else {
+          corrStr = await agregarFila(d, fotoUrl, cur.usuario);
+          S[id].corr++;
+        }
         reset(id);
         return bot.sendMessage(id,
           `✅ ${corrStr} guardado en tu planilla!\n\n📊 Ver planilla:\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}\n\nEnvia otra foto para seguir registrando.`,
