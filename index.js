@@ -3,6 +3,9 @@ const TelegramBot = require("node-telegram-bot-api");
 const axios       = require("axios");
 const crypto      = require("crypto");
 const FormData    = require("form-data");
+const ExcelJS     = require("exceljs");
+const fs          = require("fs");
+const path        = require("path");
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
@@ -284,10 +287,92 @@ async function mostrarResumen(id) {
 const KB = {
   cancelar: { reply_markup:{ keyboard:[["❌ Cancelar"]], resize_keyboard:true } },
   omitir:   { reply_markup:{ keyboard:[["Omitir","❌ Cancelar"]], resize_keyboard:true, one_time_keyboard:true } },
-  inicio:   { reply_markup:{ keyboard:[["📊 Ver planilla"]], resize_keyboard:true } },
+  inicio:   { reply_markup:{ keyboard:[
+    ["📊 Ver planilla"],
+    ["🔄 Nueva planilla"]
+  ], resize_keyboard:true } },
 };
 
 // ── Manejador ─────────────────────────────────────────────
+// ── Descargar datos de Sheets y generar Excel ────────────
+async function generarExcel(usuario) {
+  const token   = await getToken();
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+
+  const res = await axios.get(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A:G`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  const filas = res.data.values || [];
+  if (filas.length <= 1) return null;
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet(usuario);
+  const HCOLOR = "FF128C7E";
+
+  ws.columns = [
+    { header:"Correlativo", key:"a", width:14 },
+    { header:"Fecha",       key:"b", width:13 },
+    { header:"Motivo",      key:"c", width:20 },
+    { header:"Destino",     key:"d", width:22 },
+    { header:"Detalle",     key:"e", width:32 },
+    { header:"Monto",       key:"f", width:14 },
+    { header:"URL Foto",    key:"g", width:45 },
+  ];
+  ws.getRow(1).eachCell(c => {
+    c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:HCOLOR } };
+    c.font = { bold:true, color:{ argb:"FFFFFFFF" }, size:11 };
+    c.alignment = { horizontal:"center", vertical:"middle" };
+  });
+  ws.getRow(1).height = 22;
+
+  // Agregar datos (skip header row from Sheets)
+  for (let i=1; i<filas.length; i++) {
+    const f = filas[i];
+    const fila = ws.addRow({ a:f[0]||"", b:f[1]||"", c:f[2]||"", d:f[3]||"", e:f[4]||"", f:Number(f[5])||"", g:f[6]||"" });
+    fila.getCell("f").numFmt = "#,##0";
+    if (fila.number % 2 === 0) {
+      fila.eachCell({ includeEmpty:true }, c => {
+        c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:"FFF1F8F6" } };
+      });
+    }
+  }
+
+  const tmpPath = path.join("/tmp", `${usuario}_Gastos.xlsx`);
+  await wb.xlsx.writeFile(tmpPath);
+  return tmpPath;
+}
+
+// ── Nueva planilla (renombrar hoja actual y crear nueva) ──
+async function nuevaPlanilla(usuario) {
+  const token   = await getToken();
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+
+  // Obtener ID de la hoja actual
+  const infoRes = await axios.get(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`,
+    { headers:{ Authorization:`Bearer ${token}` } }
+  );
+  const hojas = infoRes.data.sheets;
+  const hojaActual = hojas.find(h => h.properties.title === usuario);
+  if (!hojaActual) return null;
+
+  // Generar nombre con fecha
+  const fecha = new Date().toLocaleDateString("es-CL").replace(/\//g,"-");
+  const nuevoNombre = `${usuario}_${fecha}`;
+
+  // Renombrar hoja actual
+  await axios.post(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}:batchUpdate`,
+    { requests:[{ updateSheetProperties:{ properties:{ sheetId:hojaActual.properties.sheetId, title:nuevoNombre }, fields:"title" } }] },
+    { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
+  );
+
+  // Crear hoja nueva con el nombre del usuario
+  await asegurarHoja(token, sheetId, usuario);
+  return nuevoNombre;
+}
+
 bot.on("message", async (msg) => {
   const id  = msg.chat.id;
   const txt = (msg.text||"").trim();
@@ -317,6 +402,33 @@ bot.on("message", async (msg) => {
   if (txt==="/salir") { S[id]={ paso:"login", d:{}, usuario:null, corr:1 }; return bot.sendMessage(id,"Sesion cerrada.",{ reply_markup:{ remove_keyboard:true } }); }
   if (txt==="❌ Cancelar"||txt==="Cancelar"||txt==="/cancelar") { reset(id); return bot.sendMessage(id,"Cancelado.",KB.inicio); }
   if (txt==="/planilla"||txt==="📊 Ver planilla") return bot.sendMessage(id,`Tu planilla (hoja: ${cur.usuario}):\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}`,KB.inicio);
+
+  // Nueva planilla
+  if (txt==="🔄 Nueva planilla"||txt==="/nuevaplanilla") {
+    if (cur.paso!=="inicio") return bot.sendMessage(id,"Cancela la operacion actual primero.",KB.cancelar);
+    return bot.sendMessage(id,
+      "⚠️ Esto archivara tu planilla actual y comenzara una nueva.\n\nLa planilla actual quedara guardada con la fecha de hoy.\n\n¿Confirmas?",
+      { reply_markup:{ keyboard:[["✅ Si, nueva planilla","❌ Cancelar"]], resize_keyboard:true, one_time_keyboard:true } }
+    );
+  }
+
+  if (txt==="✅ Si, nueva planilla") {
+    const msj = await bot.sendMessage(id,"Archivando planilla actual...");
+    try {
+      const nombreArchivo = await nuevaPlanilla(cur.usuario);
+      S[id].corr = 1;
+      await bot.deleteMessage(id, msj.message_id).catch(()=>{});
+      return bot.sendMessage(id,
+        `✅ Planilla archivada como "${nombreArchivo}".\n\nTu nueva planilla esta lista. El proximo gasto sera GASTO_0001.\n\nEnvia una foto para empezar.`,
+        KB.inicio
+      );
+    } catch(e) {
+      console.error("Error nueva planilla:", e.message);
+      await bot.deleteMessage(id, msj.message_id).catch(()=>{});
+      bot.sendMessage(id,"Error al crear nueva planilla. Intenta de nuevo.",KB.inicio);
+    }
+    return;
+  }
 
   // Agregar gasto pendiente: /agregar 0003
   if (txt.startsWith("/agregar")) {
