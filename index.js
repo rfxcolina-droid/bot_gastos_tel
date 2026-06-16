@@ -53,7 +53,7 @@ const DESTINOS = [
   "PFV Los Quilos",
   "PFV Las Violetas",
   "PFV San Ramon",
-  "TW",
+  // "Destino4",
   // "Destino5",
   // "Destino6",
   // "Destino7",
