@@ -533,7 +533,7 @@ bot.on("message", async (msg) => {
         const esNuevo = !(await obtenerOCrearExcelDrive(cur.usuario, await getTokenDrive()));
         const [corrStr] = await Promise.all([
           agregarFilaSheets(d, fotoUrl, cur.usuario),
-          actualizarExcelDrive(d, d, fotoUrl, esNuevo).catch(e=>console.error("Drive Excel:",e.message)),
+          actualizarExcelDrive(cur.usuario, d, fotoUrl, esNuevo).catch(e=>console.error("Drive Excel:",e.message)),
         ]);
 
         if (!d.esPendiente) S[id].corr++;
