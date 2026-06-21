@@ -99,10 +99,9 @@ async function getTokenDrive() {
 
 // ── Buscar archivo Excel del usuario en Drive ────────────
 async function buscarArchivoExcel(usuario, token) {
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
-  const nombre   = `${usuario}_Gastos.xlsx`;
+  const nombre = `${usuario}_Gastos.xlsx`;
   const busq = await axios.get(
-    `https://www.googleapis.com/drive/v3/files?q=name='${nombre}' and '${folderId}' in parents and trashed=false&fields=files(id,name)`,
+    `https://www.googleapis.com/drive/v3/files?q=name='${nombre}' and trashed=false&fields=files(id,name)`,
     { headers:{ Authorization:`Bearer ${token}` } }
   );
   return busq.data.files.length > 0 ? busq.data.files[0].id : null;
@@ -153,9 +152,8 @@ async function guardarWorkbook(wb, usuario, token, fileId) {
       { headers:{ Authorization:`Bearer ${token}`, "Content-Type":mimeType } }
     );
   } else {
-    const folderId  = process.env.GOOGLE_DRIVE_FOLDER_ID;
     const boundary  = "excel_boundary_123";
-    const metadata  = JSON.stringify({ name:nombre, parents:[folderId] });
+    const metadata  = JSON.stringify({ name:nombre });
     const body = Buffer.concat([
       Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
       buffer,
@@ -166,12 +164,22 @@ async function guardarWorkbook(wb, usuario, token, fileId) {
       body,
       { headers:{ Authorization:`Bearer ${token}`, "Content-Type":`multipart/related; boundary=${boundary}` } }
     );
+    fileId = res.data.id;
+    // Compartir el archivo directamente con tu email (transferencia real de propiedad
+    // no es posible entre cuenta de servicio y Gmail personal, así que se comparte como Editor)
+    const ownerEmail = process.env.GOOGLE_OWNER_EMAIL;
+    if (ownerEmail) {
+      await axios.post(
+        `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
+        { role:"writer", type:"user", emailAddress: ownerEmail },
+        { headers:{ Authorization:`Bearer ${token}` }, params: { sendNotificationEmail: false } }
+      ).catch(e => console.error("Error compartiendo con owner:", e.response?.data || e.message));
+    }
     await axios.post(
-      `https://www.googleapis.com/drive/v3/files/${res.data.id}/permissions`,
+      `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
       { role:"reader", type:"anyone" },
       { headers:{ Authorization:`Bearer ${token}` } }
-    );
-    fileId = res.data.id;
+    ).catch(e => console.error("Error permiso publico:", e.response?.data || e.message));
   }
   fs.unlinkSync(tmpPath);
   return fileId;
