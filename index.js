@@ -301,18 +301,47 @@ bot.on("message", async (msg) => {
     if (txt==="/start") return bot.sendMessage(id,"Bienvenido al Bot de Gastos.\n\nIngresa tu codigo de acceso:",{ reply_markup:{ remove_keyboard:true } });
     if (USUARIOS[txt]) {
       const nombre = USUARIOS[txt];
-      S[id] = { paso:"inicio", d:{}, usuario:nombre, corr:1 };
+      S[id] = { paso:"inicio", d:{}, usuario:nombre, corr:1, corrVerificado:false };
       await bot.sendMessage(id,`Bienvenido ${nombre}! Cargando tu planilla...`);
       try {
         const ult = await obtenerUltimoCorrelativo(nombre);
         S[id].corr = ult;
+        S[id].corrVerificado = true;
       } catch(e) { console.error(e.message); }
+
+      if (!S[id].corrVerificado) {
+        S[id].paso = "bloqueado_correlativo";
+        return bot.sendMessage(id,
+          `⚠️ No pude confirmar el ultimo correlativo de tu planilla (problema de conexion).\n\nPor seguridad, NO puedo dejarte registrar gastos hasta verificar el numero correcto, para evitar que las fotos se sobrescriban.\n\nEscribe /reintentar para intentar de nuevo.`,
+          { reply_markup:{ remove_keyboard:true } }
+        );
+      }
       return bot.sendMessage(id,
         `Listo! Tu proximo gasto sera GASTO_${String(S[id].corr).padStart(4,"0")}\n\nEnvia una FOTO de boleta para registrar.\n\nComandos:\n/planilla - ver tu planilla\n/saltar - saltar un correlativo\n/agregar 0003 - completar un gasto pendiente\n/salir - cerrar sesion`,
         KB.inicio
       );
     }
     return bot.sendMessage(id,"Codigo incorrecto. Intenta nuevamente:");
+  }
+
+  // ── Bloqueado por correlativo no verificado ──────────
+  if (cur.paso==="bloqueado_correlativo") {
+    if (txt==="/reintentar") {
+      await bot.sendMessage(id,"Reintentando...");
+      try {
+        const ult = await obtenerUltimoCorrelativo(cur.usuario);
+        S[id].corr = ult;
+        S[id].corrVerificado = true;
+        S[id].paso = "inicio";
+        return bot.sendMessage(id,
+          `✅ Verificado! Tu proximo gasto sera GASTO_${String(ult).padStart(4,"0")}\n\nEnvia una foto para registrar.`,
+          KB.inicio
+        );
+      } catch(e) {
+        return bot.sendMessage(id,"Sigue fallando la conexion. Intenta de nuevo en unos segundos con /reintentar");
+      }
+    }
+    return bot.sendMessage(id,"Escribe /reintentar para verificar tu correlativo antes de continuar.");
   }
 
   // ── Comandos globales ────────────────────────────────
