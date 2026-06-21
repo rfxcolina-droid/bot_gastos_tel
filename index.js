@@ -537,4 +537,4 @@ bot.on("message", async (msg) => {
 });
 
 bot.on("polling_error", err=>console.error("Polling error:",err.message));
-console.log("Bot iniciado - Google Sheets nativo por usuario, misma carpeta!");
+console.log("VERSION_PRUEBA_99 - Google Sheets nativo por usuario");
