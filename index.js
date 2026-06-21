@@ -79,13 +79,13 @@ function ses(id) { if (!S[id]) S[id] = { paso:"login", d:{}, usuario:null, corr:
 function set(id, paso, d) { S[id] = { ...ses(id), paso, d: d !== undefined ? d : ses(id).d }; }
 function reset(id) { const u=ses(id); S[id]={ paso:"inicio", d:{}, usuario:u.usuario, corr:u.corr }; }
 
-// ── Google Auth ───────────────────────────────────────────
-async function getToken(scope) {
+// ── Google Auth (solo Drive) ──────────────────────────────
+async function getTokenDrive() {
   const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const now   = Math.floor(Date.now()/1000);
   const hdr   = Buffer.from(JSON.stringify({alg:"RS256",typ:"JWT"})).toString("base64url");
   const pay   = Buffer.from(JSON.stringify({
-    iss:creds.client_email, scope,
+    iss:creds.client_email, scope:"https://www.googleapis.com/auth/drive",
     aud:"https://oauth2.googleapis.com/token", exp:now+3600, iat:now,
   })).toString("base64url");
   const sign = crypto.createSign("RSA-SHA256");
@@ -97,81 +97,27 @@ async function getToken(scope) {
   return res.data.access_token;
 }
 
-// ── Google Sheets (respaldo) ──────────────────────────────
-async function getTokenSheets() { return getToken("https://www.googleapis.com/auth/spreadsheets"); }
-async function getTokenDrive()  { return getToken("https://www.googleapis.com/auth/drive"); }
-
-async function asegurarHojaSheets(token, sheetId, hoja) {
-  const res = await axios.get(
-    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties.title`,
-    { headers:{ Authorization:`Bearer ${token}` } }
-  );
-  const hojas = res.data.sheets.map(h=>h.properties.title);
-  if (!hojas.includes(hoja)) {
-    await axios.post(
-      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}:batchUpdate`,
-      { requests:[{ addSheet:{ properties:{ title:hoja } } }] },
-      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
-    );
-    await axios.put(
-      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${hoja}!A1:G1?valueInputOption=USER_ENTERED`,
-      { values:[["Correlativo","Fecha","Motivo","Destino","Detalle","Monto","URL Foto"]] },
-      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
-    );
-  }
-}
-
-async function agregarFilaSheets(g, fotoUrl, usuario) {
-  const token   = await getTokenSheets();
-  const sheetId = process.env.GOOGLE_SHEET_ID;
-  await asegurarHojaSheets(token, sheetId, usuario);
-  const corr = `GASTO_${String(g.corr).padStart(4,"0")}`;
-  await axios.post(
-    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A:G:append?valueInputOption=USER_ENTERED`,
-    { values:[[corr, g.fecha||"", g.motivo||"", g.destino||"", g.detalle||"", g.monto!=null?Number(g.monto):"", fotoUrl||""]] },
-    { headers:{ Authorization:`Bearer ${token}` } }
-  );
-  return corr;
-}
-
-// ── Excel en Drive (archivo por usuario) ─────────────────
-const EXCEL_FILE_IDS = {}; // caché de IDs de archivos en Drive
-
-async function obtenerOCrearExcelDrive(usuario, token) {
+// ── Buscar archivo Excel del usuario en Drive ────────────
+async function buscarArchivoExcel(usuario, token) {
   const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
   const nombre   = `${usuario}_Gastos.xlsx`;
-
-  // Buscar si ya existe
   const busq = await axios.get(
     `https://www.googleapis.com/drive/v3/files?q=name='${nombre}' and '${folderId}' in parents and trashed=false&fields=files(id,name)`,
     { headers:{ Authorization:`Bearer ${token}` } }
   );
-  if (busq.data.files.length > 0) {
-    return busq.data.files[0].id;
-  }
-  return null; // No existe aún
+  return busq.data.files.length > 0 ? busq.data.files[0].id : null;
 }
 
-async function actualizarExcelDrive(usuario, g, fotoUrl, esNuevo) {
-  const driveToken = await getTokenDrive();
-  const folderId   = process.env.GOOGLE_DRIVE_FOLDER_ID;
-  const nombre     = `${usuario}_Gastos.xlsx`;
-  const tmpPath    = path.join("/tmp", nombre);
-  const HCOLOR     = "FF128C7E";
-
-  // Descargar Excel existente o crear nuevo
-  const fileId = await obtenerOCrearExcelDrive(usuario, driveToken);
-  const wb     = new ExcelJS.Workbook();
-
-  if (fileId && !esNuevo) {
-    // Descargar archivo existente
+// ── Cargar workbook desde Drive (o crear nuevo) ──────────
+async function cargarWorkbook(usuario, token, fileId) {
+  const wb = new ExcelJS.Workbook();
+  if (fileId) {
     const res = await axios.get(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-      { headers:{ Authorization:`Bearer ${driveToken}` }, responseType:"arraybuffer" }
+      { headers:{ Authorization:`Bearer ${token}` }, responseType:"arraybuffer" }
     );
     await wb.xlsx.load(Buffer.from(res.data));
   } else {
-    // Crear nuevo libro
     const ws = wb.addWorksheet(usuario);
     ws.columns = [
       { header:"Correlativo", key:"a", width:14 },
@@ -183,15 +129,61 @@ async function actualizarExcelDrive(usuario, g, fotoUrl, esNuevo) {
       { header:"URL Foto",    key:"g", width:45 },
     ];
     ws.getRow(1).eachCell(c => {
-      c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:HCOLOR } };
+      c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF128C7E" } };
       c.font = { bold:true, color:{ argb:"FFFFFFFF" }, size:11 };
       c.alignment = { horizontal:"center", vertical:"middle" };
     });
     ws.getRow(1).height = 22;
   }
+  return wb;
+}
 
-  // Agregar fila nueva
-  const ws   = wb.getWorksheet(usuario) || wb.worksheets[0];
+// ── Subir/actualizar workbook en Drive ────────────────────
+async function guardarWorkbook(wb, usuario, token, fileId) {
+  const nombre  = `${usuario}_Gastos.xlsx`;
+  const tmpPath = path.join("/tmp", nombre);
+  await wb.xlsx.writeFile(tmpPath);
+  const buffer   = fs.readFileSync(tmpPath);
+  const mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+  if (fileId) {
+    await axios.patch(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+      buffer,
+      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":mimeType } }
+    );
+  } else {
+    const folderId  = process.env.GOOGLE_DRIVE_FOLDER_ID;
+    const boundary  = "excel_boundary_123";
+    const metadata  = JSON.stringify({ name:nombre, parents:[folderId] });
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
+      buffer,
+      Buffer.from(`\r\n--${boundary}--`),
+    ]);
+    const res = await axios.post(
+      `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`,
+      body,
+      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":`multipart/related; boundary=${boundary}` } }
+    );
+    await axios.post(
+      `https://www.googleapis.com/drive/v3/files/${res.data.id}/permissions`,
+      { role:"reader", type:"anyone" },
+      { headers:{ Authorization:`Bearer ${token}` } }
+    );
+    fileId = res.data.id;
+  }
+  fs.unlinkSync(tmpPath);
+  return fileId;
+}
+
+// ── Agregar gasto al Excel ─────────────────────────────────
+async function agregarGastoExcel(usuario, g, fotoUrl) {
+  const token  = await getTokenDrive();
+  const fileId = await buscarArchivoExcel(usuario, token);
+  const wb     = await cargarWorkbook(usuario, token, fileId);
+  const ws     = wb.getWorksheet(usuario) || wb.worksheets[0];
+
   const corr = `GASTO_${String(g.corr).padStart(4,"0")}`;
   const fila = ws.addRow([corr, g.fecha||"", g.motivo||"", g.destino||"", g.detalle||"", g.monto!=null?Number(g.monto):"", fotoUrl||""]);
   fila.getCell(6).numFmt = "#,##0";
@@ -201,87 +193,90 @@ async function actualizarExcelDrive(usuario, g, fotoUrl, esNuevo) {
     });
   }
 
-  // Guardar temporalmente
-  await wb.xlsx.writeFile(tmpPath);
-  const buffer = fs.readFileSync(tmpPath);
-
-  // Subir a Drive
-  const mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (fileId && !esNuevo) {
-    // Actualizar existente
-    const form = new FormData();
-    form.append("file", buffer, { filename:nombre, contentType:mimeType });
-    await axios.patch(
-      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`,
-      buffer,
-      { headers:{ Authorization:`Bearer ${driveToken}`, "Content-Type":mimeType } }
-    );
-  } else {
-    // Crear nuevo
-    const boundary = "excel_boundary";
-    const metadata = JSON.stringify({ name:nombre, parents:[folderId] });
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
-      buffer,
-      Buffer.from(`\r\n--${boundary}--`),
-    ]);
-    const res = await axios.post(
-      `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`,
-      body,
-      { headers:{ Authorization:`Bearer ${driveToken}`, "Content-Type":`multipart/related; boundary=${boundary}` } }
-    );
-    // Hacer público
-    await axios.post(
-      `https://www.googleapis.com/drive/v3/files/${res.data.id}/permissions`,
-      { role:"reader", type:"anyone" },
-      { headers:{ Authorization:`Bearer ${driveToken}` } }
-    );
-  }
-
-  fs.unlinkSync(tmpPath);
+  await guardarWorkbook(wb, usuario, token, fileId);
   return corr;
 }
 
-// ── Nueva planilla en Sheets ──────────────────────────────
-async function nuevaPlanillaSheets(usuario) {
-  const token   = await getTokenSheets();
-  const sheetId = process.env.GOOGLE_SHEET_ID;
-  const infoRes = await axios.get(
-    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`,
-    { headers:{ Authorization:`Bearer ${token}` } }
-  );
-  const hojas      = infoRes.data.sheets;
-  const hojaActual = hojas.find(h=>h.properties.title===usuario);
-  if (!hojaActual) return null;
-  const fecha      = new Date().toLocaleDateString("es-CL").replace(/\//g,"-");
-  const nuevoNombre = `${usuario}_${fecha}`;
-  await axios.post(
-    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}:batchUpdate`,
-    { requests:[{ updateSheetProperties:{ properties:{ sheetId:hojaActual.properties.sheetId, title:nuevoNombre }, fields:"title" } }] },
-    { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
-  );
-  await asegurarHojaSheets(token, sheetId, usuario);
-  return nuevoNombre;
+// ── Actualizar fila pendiente ──────────────────────────────
+async function actualizarFilaPendiente(usuario, g, fotoUrl) {
+  const token  = await getTokenDrive();
+  const fileId = await buscarArchivoExcel(usuario, token);
+  const wb     = await cargarWorkbook(usuario, token, fileId);
+  const ws     = wb.getWorksheet(usuario) || wb.worksheets[0];
+
+  const corr = `GASTO_${String(g.corr).padStart(4,"0")}`;
+  let filaEncontrada = null;
+  ws.eachRow((fila, idx) => {
+    if (idx===1) return;
+    if (fila.getCell(1).value === corr) filaEncontrada = fila;
+  });
+
+  if (filaEncontrada) {
+    filaEncontrada.getCell(1).value = corr;
+    filaEncontrada.getCell(2).value = g.fecha||"";
+    filaEncontrada.getCell(3).value = g.motivo||"";
+    filaEncontrada.getCell(4).value = g.destino||"";
+    filaEncontrada.getCell(5).value = g.detalle||"";
+    filaEncontrada.getCell(6).value = g.monto!=null?Number(g.monto):"";
+    filaEncontrada.getCell(6).numFmt = "#,##0";
+    filaEncontrada.getCell(7).value = fotoUrl||"";
+  } else {
+    const fila = ws.addRow([corr, g.fecha||"", g.motivo||"", g.destino||"", g.detalle||"", g.monto!=null?Number(g.monto):"", fotoUrl||""]);
+    fila.getCell(6).numFmt = "#,##0";
+  }
+
+  await guardarWorkbook(wb, usuario, token, fileId);
+  return corr;
 }
 
-// ── Nueva planilla Excel en Drive ─────────────────────────
-async function nuevaPlanillaDrive(usuario) {
-  const driveToken = await getTokenDrive();
-  const folderId   = process.env.GOOGLE_DRIVE_FOLDER_ID;
-  const nombre     = `${usuario}_Gastos.xlsx`;
-  const fecha      = new Date().toLocaleDateString("es-CL").replace(/\//g,"-");
-  const nombreArch = `${usuario}_Gastos_${fecha}.xlsx`;
+// ── Saltar correlativo (fila PENDIENTE) ────────────────────
+async function saltarCorrelativo(usuario, corrNum) {
+  const token  = await getTokenDrive();
+  const fileId = await buscarArchivoExcel(usuario, token);
+  const wb     = await cargarWorkbook(usuario, token, fileId);
+  const ws     = wb.getWorksheet(usuario) || wb.worksheets[0];
 
-  // Renombrar archivo actual
-  const fileId = await obtenerOCrearExcelDrive(usuario, driveToken);
-  if (fileId) {
-    await axios.patch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}`,
-      { name: nombreArch },
-      { headers:{ Authorization:`Bearer ${driveToken}`, "Content-Type":"application/json" } }
-    );
+  const corr = `GASTO_${String(corrNum).padStart(4,"0")}`;
+  ws.addRow([corr, "", "", "", "*** PENDIENTE ***", "", ""]);
+  await guardarWorkbook(wb, usuario, token, fileId);
+  return corr;
+}
+
+// ── Obtener último correlativo ────────────────────────────
+async function obtenerUltimoCorrelativo(usuario) {
+  try {
+    const token  = await getTokenDrive();
+    const fileId = await buscarArchivoExcel(usuario, token);
+    if (!fileId) return 1;
+    const wb = await cargarWorkbook(usuario, token, fileId);
+    const ws = wb.getWorksheet(usuario) || wb.worksheets[0];
+    let maxCorr = 0;
+    ws.eachRow((fila, idx) => {
+      if (idx===1) return;
+      const val = String(fila.getCell(1).value||"");
+      const match = val.match(/(\d{4})$/);
+      if (match) { const n=parseInt(match[1]); if(n>maxCorr) maxCorr=n; }
+    });
+    return maxCorr + 1;
+  } catch(e) {
+    console.error("Error obteniendo correlativo:", e.message);
+    return 1;
   }
-  return nombreArch;
+}
+
+// ── Nueva planilla (renombrar archivo actual) ─────────────
+async function nuevaPlanilla(usuario) {
+  const token  = await getTokenDrive();
+  const fileId = await buscarArchivoExcel(usuario, token);
+  if (!fileId) return null;
+  const fecha = new Date().toLocaleDateString("es-CL").replace(/\//g,"-");
+  const nuevoNombre = `${usuario}_Gastos_${fecha}.xlsx`;
+  await axios.patch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}`,
+    { name: nuevoNombre },
+    { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
+  );
+  return nuevoNombre;
 }
 
 // ── Cloudinary ────────────────────────────────────────────
@@ -295,34 +290,6 @@ async function subirCloudinary(buffer, nombre) {
     form, { headers:form.getHeaders(), timeout:30000 }
   );
   return res.data.secure_url;
-}
-
-// ── Obtener último correlativo ────────────────────────────
-async function obtenerUltimoCorrelativo(usuario) {
-  try {
-    const token   = await getTokenSheets();
-    const sheetId = process.env.GOOGLE_SHEET_ID;
-    const infoRes = await axios.get(
-      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties.title`,
-      { headers:{ Authorization:`Bearer ${token}` } }
-    );
-    const hojas = infoRes.data.sheets.map(h=>h.properties.title);
-    if (!hojas.includes(usuario)) return 1;
-    const res = await axios.get(
-      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${usuario}!A:A`,
-      { headers:{ Authorization:`Bearer ${token}` } }
-    );
-    const filas = res.data.values || [];
-    let maxCorr = 0;
-    for (const fila of filas) {
-      const match = (fila[0]||"").match(/(\d{4})$/);
-      if (match) { const n=parseInt(match[1]); if(n>maxCorr) maxCorr=n; }
-    }
-    return maxCorr + 1;
-  } catch(e) {
-    console.error("Error obteniendo correlativo:", e.message);
-    return 1;
-  }
 }
 
 // ── Claude ────────────────────────────────────────────────
@@ -401,7 +368,7 @@ bot.on("message", async (msg) => {
         S[id].corr = ult;
       } catch(e) { console.error(e.message); }
       return bot.sendMessage(id,
-        `Listo! Tu proximo gasto sera GASTO_${String(S[id].corr).padStart(4,"0")}\n\nEnvia una FOTO de boleta para registrar.\n\nComandos:\n/planilla - ver tu planilla en Sheets\n/saltar - saltar un correlativo\n/agregar 0003 - completar un gasto pendiente\n/salir - cerrar sesion`,
+        `Listo! Tu proximo gasto sera GASTO_${String(S[id].corr).padStart(4,"0")}\n\nEnvia una FOTO de boleta para registrar.\n\nComandos:\n/planilla - ver tu Excel\n/saltar - saltar un correlativo\n/agregar 0003 - completar un gasto pendiente\n/salir - cerrar sesion`,
         KB.inicio
       );
     }
@@ -411,7 +378,20 @@ bot.on("message", async (msg) => {
   // ── Comandos globales ────────────────────────────────
   if (txt==="/salir") { S[id]={ paso:"login", d:{}, usuario:null, corr:1 }; return bot.sendMessage(id,"Sesion cerrada.",{ reply_markup:{ remove_keyboard:true } }); }
   if (txt==="❌ Cancelar"||txt==="Cancelar"||txt==="/cancelar") { reset(id); return bot.sendMessage(id,"Cancelado.",KB.inicio); }
-  if (txt==="/planilla"||txt==="📊 Ver planilla") return bot.sendMessage(id,`Tu planilla (hoja: ${cur.usuario}):\nhttps://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}`,KB.inicio);
+
+  if (txt==="/planilla"||txt==="📊 Ver planilla") {
+    const msj = await bot.sendMessage(id,"Buscando tu planilla...");
+    try {
+      const token  = await getTokenDrive();
+      const fileId = await buscarArchivoExcel(cur.usuario, token);
+      await bot.deleteMessage(id,msj.message_id).catch(()=>{});
+      if (!fileId) return bot.sendMessage(id,"Aun no tienes gastos registrados.",KB.inicio);
+      return bot.sendMessage(id,`Tu planilla:\nhttps://docs.google.com/spreadsheets/d/${fileId}/edit\n\n(Se abre con Google Sheets, o descarga el .xlsx desde Drive)`,KB.inicio);
+    } catch(e) {
+      await bot.deleteMessage(id,msj.message_id).catch(()=>{});
+      return bot.sendMessage(id,"Error buscando la planilla.",KB.inicio);
+    }
+  }
 
   // ── Saltar correlativo ───────────────────────────────
   if (txt==="/saltar") {
@@ -419,17 +399,13 @@ bot.on("message", async (msg) => {
     const corrSaltado = cur.corr;
     S[id].corr++;
     try {
-      const token   = await getTokenSheets();
-      const sheetId = process.env.GOOGLE_SHEET_ID;
-      await asegurarHojaSheets(token, sheetId, cur.usuario);
-      const corrStr = `GASTO_${String(corrSaltado).padStart(4,"0")}`;
-      await axios.post(
-        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${cur.usuario}!A:G:append?valueInputOption=USER_ENTERED`,
-        { values:[[corrStr,"","","","*** PENDIENTE ***","",""]] },
-        { headers:{ Authorization:`Bearer ${token}` } }
-      );
+      const corrStr = await saltarCorrelativo(cur.usuario, corrSaltado);
       return bot.sendMessage(id,`⏭️ ${corrStr} reservado como PENDIENTE.\n\nEl proximo gasto sera GASTO_${String(S[id].corr).padStart(4,"0")}.\n\nEnvia una foto para continuar.`,KB.inicio);
-    } catch(e) { S[id].corr--; return bot.sendMessage(id,"Error al saltar. Intenta de nuevo."); }
+    } catch(e) {
+      S[id].corr--;
+      console.error("Error saltando:",e.message);
+      return bot.sendMessage(id,"Error al saltar. Intenta de nuevo.");
+    }
   }
 
   // ── Agregar pendiente ─────────────────────────────────
@@ -446,7 +422,7 @@ bot.on("message", async (msg) => {
   if (txt==="🔄 Nueva planilla"||txt==="/nuevaplanilla") {
     if (cur.paso!=="inicio") return bot.sendMessage(id,"Cancela la operacion actual primero.",KB.cancelar);
     return bot.sendMessage(id,
-      "⚠️ Esto archivara tu planilla actual y comenzara una nueva.\n\nLa planilla actual quedara guardada con la fecha de hoy (tanto en Sheets como en Drive).\n\n¿Confirmas?",
+      "⚠️ Esto archivara tu planilla actual y comenzara una nueva.\n\nLa planilla actual quedara guardada con la fecha de hoy en Drive.\n\n¿Confirmas?",
       { reply_markup:{ keyboard:[["✅ Si, nueva planilla","❌ Cancelar"]], resize_keyboard:true, one_time_keyboard:true } }
     );
   }
@@ -454,17 +430,15 @@ bot.on("message", async (msg) => {
   if (txt==="✅ Si, nueva planilla") {
     const msj = await bot.sendMessage(id,"Archivando planilla actual...");
     try {
-      const [nombreSheets, nombreDrive] = await Promise.all([
-        nuevaPlanillaSheets(cur.usuario),
-        nuevaPlanillaDrive(cur.usuario),
-      ]);
+      const nombreArchivado = await nuevaPlanilla(cur.usuario);
       S[id].corr = 1;
       await bot.deleteMessage(id,msj.message_id).catch(()=>{});
       return bot.sendMessage(id,
-        `✅ Planillas archivadas:\n📊 Sheets: "${nombreSheets}"\n📁 Drive: "${nombreDrive}"\n\nTu nueva planilla esta lista. El proximo gasto sera GASTO_0001.\n\nEnvia una foto para empezar.`,
+        `✅ Planilla archivada como "${nombreArchivado||"sin gastos previos"}".\n\nTu nueva planilla esta lista. El proximo gasto sera GASTO_0001.\n\nEnvia una foto para empezar.`,
         KB.inicio
       );
     } catch(e) {
+      console.error("Error nueva planilla:",e.message);
       await bot.deleteMessage(id,msj.message_id).catch(()=>{});
       return bot.sendMessage(id,"Error al crear nueva planilla. Intenta de nuevo.",KB.inicio);
     }
@@ -529,18 +503,18 @@ bot.on("message", async (msg) => {
         let fotoUrl  = "";
         try { fotoUrl=await subirCloudinary(d.buffer,nombre); } catch(e) { console.error("Cloudinary:",e.message); }
 
-        // Guardar en Sheets (respaldo) y Excel en Drive en paralelo
-        const esNuevo = !(await obtenerOCrearExcelDrive(cur.usuario, await getTokenDrive()));
-        const [corrStr] = await Promise.all([
-          agregarFilaSheets(d, fotoUrl, cur.usuario),
-          actualizarExcelDrive(cur.usuario, d, fotoUrl, esNuevo).catch(e=>console.error("Drive Excel:",e.message)),
-        ]);
+        let corrStr;
+        if (d.esPendiente) {
+          corrStr = await actualizarFilaPendiente(cur.usuario, d, fotoUrl);
+        } else {
+          corrStr = await agregarGastoExcel(cur.usuario, d, fotoUrl);
+          S[id].corr++;
+        }
 
-        if (!d.esPendiente) S[id].corr++;
         reset(id);
         await bot.deleteMessage(id,msj.message_id).catch(()=>{});
         return bot.sendMessage(id,
-          `✅ ${corrStr} guardado!\n\n📊 Google Sheets: hoja "${cur.usuario}"\n📁 Drive: ${cur.usuario}_Gastos.xlsx\n\nEnvia otra foto para seguir registrando.`,
+          `✅ ${corrStr} guardado en tu planilla!\n\nEnvia otra foto para seguir registrando.\n/planilla - ver tu Excel`,
           KB.inicio
         );
       } catch(e) {
@@ -573,8 +547,8 @@ bot.on("message", async (msg) => {
   if (cur.paso==="editando_destino_manual") { set(id,"pre_resumen",{...cur.d,destino:txt}); await mostrarResumen(id); return; }
   if (cur.paso==="editando_detalle")  { set(id,"pre_resumen",{...cur.d,detalle:txt==="Omitir"?"":txt}); await mostrarResumen(id); return; }
 
-  if (cur.paso==="inicio") bot.sendMessage(id,"Envia una foto de boleta.\n/planilla - ver tu planilla",KB.inicio);
+  if (cur.paso==="inicio") bot.sendMessage(id,"Envia una foto de boleta.\n/planilla - ver tu Excel",KB.inicio);
 });
 
 bot.on("polling_error", err=>console.error("Polling error:",err.message));
-console.log("Bot iniciado - Sheets + Excel en Drive por usuario!");
+console.log("Bot iniciado - Solo Excel en Drive por usuario!");
