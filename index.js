@@ -115,25 +115,27 @@ async function obtenerOCrearSheet(usuario, token) {
   if (busq.data.files.length > 0) {
     sheetId = busq.data.files[0].id;
   } else {
-    // Crear Google Sheets nuevo (nativo, no .xlsx) — esto SI funciona con cuenta de servicio
+    // Crear el archivo de Google Sheets DIRECTO en la carpeta usando Drive API
+    // (en vez de crear con Sheets API + mover, que requiere permisos extra)
     const createRes = await axios.post(
-      "https://sheets.googleapis.com/v4/spreadsheets",
+      "https://www.googleapis.com/drive/v3/files",
       {
-        properties: { title: nombre },
-        sheets: [{ properties: { title: "Gastos" } }]
+        name: nombre,
+        mimeType: "application/vnd.google-apps.spreadsheet",
+        parents: [folderId]
       },
       { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
     );
-    sheetId = createRes.data.spreadsheetId;
+    sheetId = createRes.data.id;
 
-    // Mover a la carpeta correcta
-    await axios.patch(
-      `https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${folderId}&fields=id,parents`,
-      {},
-      { headers:{ Authorization:`Bearer ${token}` } }
-    );
+    // Renombrar la pestaña por defecto a "Gastos" y agregar cabeceras
+    await axios.post(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}:batchUpdate`,
+      { requests:[{ updateSheetProperties:{ properties:{ sheetId:0, title:"Gastos" }, fields:"title" } }] },
+      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" } }
+    ).catch(e => console.error("Error renombrando pestaña:", e.response?.data || e.message));
 
-    // Compartir con tu email personal como editor (para que lo veas en tu Drive)
+    // Compartir con tu email personal como editor (opcional, puede fallar sin afectar el flujo)
     const ownerEmail = process.env.GOOGLE_OWNER_EMAIL;
     if (ownerEmail) {
       await axios.post(
@@ -243,7 +245,7 @@ async function obtenerUltimoCorrelativo(usuario) {
     }
     return maxCorr + 1;
   } catch(e) {
-    console.error("Error obteniendo correlativo:", e.message);
+    console.error("Error obteniendo correlativo:", JSON.stringify(e.response?.data) || e.message);
     return 1;
   }
 }
